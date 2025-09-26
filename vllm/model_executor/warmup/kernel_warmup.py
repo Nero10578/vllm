@@ -57,7 +57,7 @@ def kernel_warmup(worker: "Worker"):
             skip_eplb=True,
             is_profile=True,
             force_attention=True,
-            create_mixed_batch=True,
+            create_mixed_batch=False,
         )
 
 
