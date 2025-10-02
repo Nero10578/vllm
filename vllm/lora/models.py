@@ -59,10 +59,11 @@ def get_lora_id():
 def is_moe_model(model: nn.Module) -> bool:
     """Checks if the model contains FusedMoE layers and warns the user."""
     if any(isinstance(module, FusedMoE) for module in model.modules()):
-        logger.warning_once(
-            "For MoE models, vLLM currently does not support fused MoE LoRA "
-            "inference. Please ensure that the loaded LoRA model does not "
-            "contain expert weights.")
+        if not envs.VLLM_ENABLE_LORA_ON_MOE:
+            logger.warning_once(
+                "For MoE models, vLLM currently does not support fused MoE LoRA "
+                "inference. Please ensure that the loaded LoRA model does not "
+                "contain expert weights.")
         return True
     return False
 
