@@ -1174,6 +1174,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK":
     lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))),
 
+    # If set, vLLM will use a slower, iterative MoE implementation that is
+    # compatible with LoRA. This is useful for running LoRA on MoE models,
+    # but it will be slower than the default fused MoE implementation.
+    "VLLM_ENABLE_LORA_ON_MOE":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_LORA_ON_MOE", "0"))),
+
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP16":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))),
