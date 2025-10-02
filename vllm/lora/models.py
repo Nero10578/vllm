@@ -11,6 +11,7 @@ import safetensors.torch
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
