@@ -11,6 +11,7 @@ import safetensors.torch
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
@@ -63,11 +64,13 @@ def get_lora_id():
 def is_moe_model(model: nn.Module) -> bool:
     """Checks if the model contains FusedMoE layers and warns the user."""
     if any(isinstance(module, FusedMoE) for module in model.modules()):
-        logger.warning_once(
-            "For MoE models, vLLM currently does not support fused MoE LoRA "
-            "inference. Please ensure that the loaded LoRA model does not "
-            "contain expert weights."
-        )
+        logger.info(f"VLLM_ENABLE_LORA_ON_MOE is set to: "
+                    f"{envs.VLLM_ENABLE_LORA_ON_MOE}")
+        if not envs.VLLM_ENABLE_LORA_ON_MOE:
+            logger.warning_once(
+                "For MoE models, vLLM currently does not support fused MoE LoRA "
+                "inference. Please ensure that the loaded LoRA model does not "
+                "contain expert weights.")
         return True
     return False
 
