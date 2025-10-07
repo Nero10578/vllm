@@ -94,6 +94,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
+    VLLM_FORCE_P2P: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_V1: bool = True
@@ -821,7 +822,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # if might be helpful to set VLLM_SKIP_P2P_CHECK=0
     # so that vLLM can verify if p2p is actually working.
     # See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
-    "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
+    "VLLM_SKIP_P2P_CHECK":
+    lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
+
+    # If set, vLLM will skip the P2P check and assume that P2P is
+    # available. Used for custom all-reduce kernels.
+    "VLLM_FORCE_P2P":
+    lambda: bool(int(os.getenv("VLLM_FORCE_P2P", "0"))),
+
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
     # selection
