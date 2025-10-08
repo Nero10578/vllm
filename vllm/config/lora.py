@@ -63,6 +63,9 @@ class LoRAConfig:
     bias_enabled: bool = False
     """[DEPRECATED] Enable bias for LoRA adapters. This option will be
     removed in v0.12.0."""
+    enable_cpu_pooling: bool = False
+    """Enable CPU memory pooling for LoRA adapters to reduce memory usage.
+    This is particularly useful for MoE models with many expert layers."""
 
     def compute_hash(self) -> str:
         """
@@ -84,6 +87,7 @@ class LoRAConfig:
         factors.append(self.lora_extra_vocab_size)
         factors.append(self.lora_vocab_padding_size)
         factors.append(self.bias_enabled)
+        factors.append(self.enable_cpu_pooling)
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 

@@ -14,6 +14,7 @@ from torch import nn
 import vllm.envs as envs
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
+from vllm.lora.cpu_pooled_lora import CPULoRAPool, PooledLoRALayerWeights, PooledPackedLoRALayerWeights
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
@@ -371,6 +372,17 @@ class LoRAModelManager:
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.lora_index_to_id: list[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
+        
+        # Initialize CPU memory pool for efficient storage
+        self.cpu_pool: Optional[CPULoRAPool] = None
+        if lora_config.enable_cpu_pooling:
+            self.cpu_pool = CPULoRAPool(
+                max_cpu_loras=self.capacity,
+                lora_config=lora_config,
+                pin_memory=is_pin_memory_available(),
+            )
+            logger.info(f"Initialized CPU LoRA pool with {self.capacity} slots")
+        
         self.punica_wrapper = get_punica_wrapper(
             max_num_batched_tokens,
             max_batches=self.max_num_seqs,
@@ -473,6 +485,11 @@ class LoRAModelManager:
 
     def _add_adapter(self, lora: LoRAModel):
         self._create_merged_loras_inplace(lora)
+        
+        # Apply CPU memory pooling if enabled
+        if self.cpu_pool is not None:
+            lora = self._apply_cpu_pooling(lora)
+        
         self._registered_adapters[lora.id] = lora
 
     def pin_adapter(self, lora_id: int) -> bool:
@@ -728,6 +745,45 @@ class LoRAModelManager:
                     "after removing the prefix 'model.'."
                 )
         return lora_model.get_lora(org_module_name)
+    
+    def _apply_cpu_pooling(self, lora_model: LoRAModel) -> LoRAModel:
+        """Apply CPU memory pooling to a LoRAModel."""
+        if self.cpu_pool is None:
+            return lora_model
+        
+        # Create pooled versions of all LoRA weights
+        pooled_loras = {}
+        for module_name, lora_weights in lora_model.loras.items():
+            if lora_weights.is_packed:
+                pooled_weights = PooledPackedLoRALayerWeights(
+                    lora_weights, self.cpu_pool, lora_model.id
+                )
+            else:
+                pooled_weights = PooledLoRALayerWeights(
+                    lora_weights, self.cpu_pool, lora_model.id
+                )
+            pooled_loras[module_name] = pooled_weights
+        
+        # Create a new LoRAModel with pooled weights
+        pooled_model = LoRAModel(
+            lora_model_id=lora_model.id,
+            rank=lora_model.rank,
+            loras=pooled_loras,
+        )
+        
+        logger.debug(f"Applied CPU pooling to LoRA {lora_model.id}")
+        return pooled_model
+    
+    def _deactivate_adapter(self, lora_id: int):
+        try:
+            index = self.lora_index_to_id.index(lora_id)
+            self.lora_index_to_id[index] = None
+        except ValueError:
+            pass
+        
+        # Deallocate CPU pool slot if using CPU pooling
+        if self.cpu_pool is not None and lora_id in self._registered_adapters:
+            self.cpu_pool.deallocate_slot(lora_id)
 
     def deactivate_adapter(self, adapter_id: int) -> bool:
         if adapter_id not in self._active_adapters:

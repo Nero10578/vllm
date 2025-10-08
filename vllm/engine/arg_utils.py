@@ -441,6 +441,7 @@ class EngineArgs:
     max_cpu_loras: Optional[int] = LoRAConfig.max_cpu_loras
     lora_dtype: Optional[Union[str, torch.dtype]] = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
+    enable_cpu_pooling: bool = LoRAConfig.enable_cpu_pooling
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: Optional[int] = CacheConfig.num_gpu_blocks_override
@@ -925,6 +926,9 @@ class EngineArgs:
             "--fully-sharded-loras", **lora_kwargs["fully_sharded_loras"]
         )
         lora_group.add_argument("--default-mm-loras", **lora_kwargs["default_mm_loras"])
+        lora_group.add_argument(
+            "--enable-cpu-pooling", **lora_kwargs["enable_cpu_pooling"]
+        )
 
         # Observability arguments
         observability_kwargs = get_kwargs(ObservabilityConfig)
@@ -1513,6 +1517,7 @@ class EngineArgs:
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,
+                enable_cpu_pooling=self.enable_cpu_pooling,
             )
             if self.enable_lora
             else None
