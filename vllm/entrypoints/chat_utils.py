@@ -1340,7 +1340,9 @@ def _parse_chat_message_content_part(
         raise NotImplementedError(f"Unknown part type: {part_type}")
 
     return (
-        {"type": modality} if wrap_dicts else MODALITY_PLACEHOLDERS_MAP[modality]
+        {"type": modality}
+        if wrap_dicts
+        else (MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None)
     )
 
 
