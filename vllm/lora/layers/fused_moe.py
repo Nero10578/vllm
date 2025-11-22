@@ -23,6 +23,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.lora_a_stacked = [None] * 1 # Assuming 1 slot for now
         self.lora_b_stacked = [None] * 1
 
+    def __getattr__(self, name: str):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.base_layer, name)
+
     def create_lora_weights(
         self,
         max_loras: int,
