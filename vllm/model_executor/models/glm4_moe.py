@@ -149,6 +149,7 @@ class Glm4MoE(nn.Module):
             params_dtype=torch.float32,
             quant_config=None,
             prefix=f"{prefix}.gate",
+            return_bias=False,
         )
         self.gate.e_score_correction_bias = nn.Parameter(
             torch.empty(config.n_routed_experts, dtype=torch.float32)
