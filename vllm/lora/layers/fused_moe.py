@@ -35,14 +35,32 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         lora_config: "LoRAConfig",
         model_config: Optional["PretrainedConfig"] = None,
     ) -> None:
-        # We don't create weights here because they are packed and managed by LoRAModelManager
-        # But we need to initialize the storage
-        self.lora_a_stacked = [None] * max_loras
-        self.lora_b_stacked = [None] * max_loras
+        self.lora_a_stacked = []
+        self.lora_b_stacked = []
+        
+        hidden_size = self.base_layer.hidden_size
+        intermediate_size = self.base_layer.intermediate_size_per_partition
+        rank = lora_config.r
+        dtype = self.base_layer.w13_weight.dtype
+        device = self.base_layer.w13_weight.device
+
+        for _ in range(self.num_experts):
+            # Gate Up Proj
+            # lora_a: [max_loras, rank, hidden_size]
+            self.lora_a_stacked.append(torch.zeros(max_loras, rank, hidden_size, dtype=dtype, device=device))
+            # lora_b: [max_loras, 2 * intermediate_size, rank]
+            self.lora_b_stacked.append(torch.zeros(max_loras, 2 * intermediate_size, rank, dtype=dtype, device=device))
+            
+            # Down Proj
+            # lora_a: [max_loras, rank, intermediate_size]
+            self.lora_a_stacked.append(torch.zeros(max_loras, rank, intermediate_size, dtype=dtype, device=device))
+            # lora_b: [max_loras, hidden_size, rank]
+            self.lora_b_stacked.append(torch.zeros(max_loras, hidden_size, rank, dtype=dtype, device=device))
 
     def reset_lora(self, index: int):
-        self.lora_a_stacked[index] = None
-        self.lora_b_stacked[index] = None
+        for i in range(len(self.lora_a_stacked)):
+            self.lora_a_stacked[i][index] = 0
+            self.lora_b_stacked[i][index] = 0
 
     def set_lora(
         self,
@@ -53,9 +71,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         bias: Optional[torch.Tensor] = None,
     ):
         # lora_a and lora_b are lists of tensors corresponding to the packed modules
-        # Order: [experts.0.gate_up_proj, experts.0.down_proj, experts.1.gate_up_proj, ...]
-        self.lora_a_stacked[index] = lora_a
-        self.lora_b_stacked[index] = lora_b
+        for i, (a, b) in enumerate(zip(lora_a, lora_b)):
+            if a is not None:
+                self.lora_a_stacked[i][index] = a
+            if b is not None:
+                self.lora_b_stacked[i][index] = b
 
     @classmethod
     def can_replace_layer(
@@ -236,12 +256,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # We use the last active adapter index
         adapter_index = active_adapters[-1]
         
-        lora_a_list = self.lora_a_stacked[adapter_index]
-        lora_b_list = self.lora_b_stacked[adapter_index]
-        
-        if lora_a_list is None or lora_b_list is None:
-             return torch.zeros_like(hidden_states)
-
         for expert_idx in range(num_experts):
             expert_w1 = w1[expert_idx]
             expert_w2 = w2[expert_idx]
@@ -254,9 +268,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             # Apply LoRA for W1 (Gate/Up)
             # Index in packed list: expert_idx * 2
             gate_up_idx = expert_idx * 2
-            if gate_up_idx < len(lora_a_list):
-                lora_a = lora_a_list[gate_up_idx]
-                lora_b = lora_b_list[gate_up_idx]
+            if gate_up_idx < len(self.lora_a_stacked):
+                lora_a = self.lora_a_stacked[gate_up_idx][adapter_index]
+                lora_b = self.lora_b_stacked[gate_up_idx][adapter_index]
+                
                 if lora_a is not None and lora_b is not None:
                     # lora_a: [rank, hidden]
                     # lora_b: [2 * intermediate, rank]
@@ -273,9 +288,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             # Apply LoRA for W2 (Down)
             # Index in packed list: expert_idx * 2 + 1
             down_idx = expert_idx * 2 + 1
-            if down_idx < len(lora_a_list):
-                lora_a = lora_a_list[down_idx]
-                lora_b = lora_b_list[down_idx]
+            if down_idx < len(self.lora_a_stacked):
+                lora_a = self.lora_a_stacked[down_idx][adapter_index]
+                lora_b = self.lora_b_stacked[down_idx][adapter_index]
+                
                 if lora_a is not None and lora_b is not None:
                     # lora_a: [rank, intermediate]
                     # lora_b: [hidden, rank]
