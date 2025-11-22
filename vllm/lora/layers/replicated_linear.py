@@ -22,6 +22,15 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         self.output_size = self.base_layer.output_size
         self.n_slices = 1
 
+    def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
+        return lora_a
+
+    def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
+        return lora_b
+
+    def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
+        return bias
+
     def forward(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[torch.Tensor]]]:
