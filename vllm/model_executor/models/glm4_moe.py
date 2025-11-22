@@ -47,6 +47,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -141,11 +142,13 @@ class Glm4MoE(nn.Module):
         # NOTE In the transformers implementation, the gate isn't an nn.Linear,
         # so we cannot use ReplicatedLinear here.
         # See: https://github.com/huggingface/transformers/blob/v4.55.1/src/transformers/models/glm4_moe/modeling_glm4_moe.py#L260
-        self.gate = nn.Linear(
-            config.hidden_size,
-            config.n_routed_experts,
+        self.gate = ReplicatedLinear(
+            input_size=config.hidden_size,
+            output_size=config.n_routed_experts,
             bias=False,
-            dtype=torch.float32,
+            params_dtype=torch.float32,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
         )
         self.gate.e_score_correction_bias = nn.Parameter(
             torch.empty(config.n_routed_experts, dtype=torch.float32)
