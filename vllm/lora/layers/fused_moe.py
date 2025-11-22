@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, List
+from typing import Optional, List, Callable, TYPE_CHECKING
 
 import torch
 from torch import nn
+
+if TYPE_CHECKING:
+    from transformers import PretrainedConfig
+    from vllm.config.lora import LoRAConfig
 
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.fused_moe import FusedMoE
