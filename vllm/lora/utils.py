@@ -34,8 +34,10 @@ from vllm.lora.layers import (
     RowParallelLinearWithLoRA,
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
+    FusedMoEWithLoRA,
 )
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.fused_moe import FusedMoE
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -58,6 +60,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
+    FusedMoEWithLoRA,
 }
 
 
@@ -208,6 +211,9 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
 
         # get all the linear subfixes.
         if isinstance(module, (LinearBase,)):
+            supported_lora_modules.add(name.split(".")[-1])
+        
+        if isinstance(module, (FusedMoE,)):
             supported_lora_modules.add(name.split(".")[-1])
 
     return list(supported_lora_modules)

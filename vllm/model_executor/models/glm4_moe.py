@@ -659,6 +659,15 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+
+        # Dynamically add experts to packed_modules_mapping
+        self.packed_modules_mapping = self.packed_modules_mapping.copy()
+        experts_list = []
+        for i in range(config.n_routed_experts):
+            experts_list.append(f"experts.{i}.gate_up_proj")
+            experts_list.append(f"experts.{i}.down_proj")
+        self.packed_modules_mapping["experts"] = experts_list
+
         self.model = Glm4MoeModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
