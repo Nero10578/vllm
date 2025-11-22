@@ -146,7 +146,7 @@ class Glm4MoE(nn.Module):
             input_size=config.hidden_size,
             output_size=config.n_routed_experts,
             bias=False,
-            params_dtype=torch.float32,
+            params_dtype=None,
             quant_config=None,
             prefix=f"{prefix}.gate",
             return_bias=False,
