@@ -113,7 +113,13 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         else:
             # May have instead defined the linear layers in the fused model
 
-            fused_layers = ["re:.*down_proj.*", "re:.*gate_proj.*", "re:.*up_proj.*"]
+            # Use the actual layer name to probe for matches in the config
+            # This supports specific regex targets (e.g. per-layer)
+            fused_layers = [
+                f"{layer.layer_name}.down_proj",
+                f"{layer.layer_name}.gate_proj",
+                f"{layer.layer_name}.up_proj"
+            ]
             current_scheme = None
             for fused_layer in fused_layers:
                 # Check if one of the fused layers are defined in quant_config
