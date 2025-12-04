@@ -109,6 +109,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         # Check if a using "Linear" to select schemes
         if "Linear" in quant_config.target_scheme_map:
             matched_target = "Linear"
+            current_scheme = quant_config.target_scheme_map.get(matched_target)
         else:
             # May have instead defined the linear layers in the fused model
 
@@ -151,11 +152,13 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                         "WNA16MoE is not supported with actorder=group/dynamic."
                     )
                 logger.info_once("Using CompressedTensorsWNA16MoEMethod")
-                return CompressedTensorsWNA16MoEMethod(quant_config, layer.moe_config)
+                return CompressedTensorsWNA16MoEMethod(
+                    quant_config, layer.moe_config, quant_scheme=current_scheme
+                )
             else:
                 logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
                 return CompressedTensorsWNA16MarlinMoEMethod(
-                    quant_config, layer.moe_config
+                    quant_config, layer.moe_config, quant_scheme=current_scheme
                 )
         elif quant_config._is_fp4a4_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A4MoeMethod(layer.moe_config)
@@ -1356,12 +1359,16 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         self,
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
         moe: FusedMoEConfig,
+        quant_scheme: Optional[dict] = None,
     ):
         super().__init__(moe)
         self.quant_config = quant_config
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
-        config = self.quant_config.target_scheme_map["Linear"].get("weights")
+        if quant_scheme:
+            config = quant_scheme.get("weights")
+        else:
+            config = self.quant_config.target_scheme_map["Linear"].get("weights")
         self.num_bits = config.num_bits
         self.packed_factor = 32 // config.num_bits
         self.strategy = config.strategy
@@ -1683,12 +1690,16 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self,
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
         moe: FusedMoEConfig,
+        quant_scheme: Optional[dict] = None,
     ):
         super().__init__(moe)
         self.quant_config = quant_config
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
-        config = self.quant_config.target_scheme_map["Linear"].get("weights")
+        if quant_scheme:
+            config = quant_scheme.get("weights")
+        else:
+            config = self.quant_config.target_scheme_map["Linear"].get("weights")
         self.num_bits = config.num_bits
         self.packed_factor = 32 // config.num_bits
         self.strategy = config.strategy
