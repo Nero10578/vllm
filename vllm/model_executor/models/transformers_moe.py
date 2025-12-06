@@ -129,7 +129,9 @@ class TransformersMoEBase(TransformersBase, MixtureOfExperts):
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ):
+        self.expert_weights = []
         for moe_layer_idx, mlp_layer in enumerate(self.mlp_layers):
+            self.expert_weights.append(mlp_layer.experts.get_expert_weights())
             mlp_layer.experts.set_eplb_state(
                 moe_layer_idx=moe_layer_idx,
                 expert_load_view=expert_load_view,

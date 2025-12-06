@@ -104,9 +104,11 @@ class RayPPCommunicator(Communicator):
             f"Unexpected actor ID length: {len(actor_id_bytes)}"
         )
 
-        actor_id_tensor = torch.frombuffer(actor_id_bytes, dtype=torch.uint8).to(
-            self._comm.device
-        )
+        # Copy the bytes to a bytearray to make it writable, as torch.frombuffer
+        # expects a writable buffer.
+        actor_id_tensor = torch.frombuffer(
+            bytearray(actor_id_bytes), dtype=torch.uint8
+        ).to(self._comm.device)
 
         # All-gather full actor IDs from all actors
         gathered_ids = self._comm.all_gather(actor_id_tensor, dim=0)
