@@ -295,3 +295,5 @@ For AMD ROCm, you can further control the specific Attention implementation usin
 
 !!! warning
     There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [docker/Dockerfile](../../docker/Dockerfile) for instructions on how to install it.
+
+Stable default d1f7392c5f774245d0a0776d141a64e72ca3e8ca
