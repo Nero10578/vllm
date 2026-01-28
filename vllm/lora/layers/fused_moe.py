@@ -46,11 +46,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
+        self.use_ep = base_layer.use_ep
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+        self.ep_size = base_layer.ep_size if self.use_ep else 1
+        self.ep_rank = base_layer.ep_rank if self.use_ep else 0
         self.device = _get_lora_device(base_layer)
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
@@ -130,7 +130,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        # Use EP-compatible prepare/finalize if EP is enabled
+        if self.use_ep:
+            from vllm.model_executor.layers.fused_moe.all2all_utils import (
+                maybe_make_prepare_finalize,
+            )
+            prepare_finalize = maybe_make_prepare_finalize(
+                self.base_layer, quant_config, self.base_layer.routing_tables
+            )
+            if prepare_finalize is None:
+                # Fallback to NoEP if no EP-specific implementation available
+                prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        else:
+            prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        
         m_fused_moe_fn = FusedMoEModularKernel(
             prepare_finalize,
             self.base_layer.quant_method.select_gemm_impl(
@@ -322,6 +335,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         max_loras: int,
         lora_config: LoRAConfig,
     ):
+        # In EP mode, local_num_experts already accounts for expert distribution
+        # In non-EP mode, local_num_experts equals global_num_experts
         self.w13_lora_a_stacked: tuple[torch.Tensor, ...] = tuple(
             torch.zeros(
                 (
@@ -351,6 +366,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         )
 
     def _create_lora_b_weights(self, max_loras: int, lora_config: LoRAConfig):
+        # In EP mode, local_num_experts already accounts for expert distribution
+        # intermediate_size_per_partition is already adjusted for EP/TP
         self.w13_lora_b_stacked: tuple[torch.Tensor, ...] = tuple(
             torch.zeros(
                 (
@@ -511,6 +528,42 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+        
+        # In EP mode, the LoRA checkpoint contains global expert IDs
+        # We need to filter to only the experts local to this EP rank
+        if self.use_ep:
+            # Get the global expert IDs for this EP rank
+            if self.base_layer.expert_map is not None:
+                # expert_map maps global expert IDs to local expert IDs
+                # We need to extract only the experts that belong to this rank
+                global_expert_ids = torch.arange(
+                    self.base_layer.global_num_experts,
+                    device=self.device
+                )
+                local_expert_mask = (global_expert_ids // self.ep_size) == self.ep_rank
+                local_global_ids = global_expert_ids[local_expert_mask]
+                
+                # Filter LoRA weights to only include local experts
+                w1_lora_a = w1_lora_a[local_expert_mask]
+                w1_lora_b = w1_lora_b[local_expert_mask]
+                w2_lora_a = w2_lora_a[local_expert_mask]
+                w2_lora_b = w2_lora_b[local_expert_mask]
+                w3_lora_a = w3_lora_a[local_expert_mask]
+                w3_lora_b = w3_lora_b[local_expert_mask]
+            else:
+                # Linear expert placement: experts are evenly distributed
+                # Extract the slice of experts for this EP rank
+                experts_per_rank = self.base_layer.global_num_experts // self.ep_size
+                start_idx = self.ep_rank * experts_per_rank
+                end_idx = start_idx + experts_per_rank
+                
+                w1_lora_a = w1_lora_a[start_idx:end_idx]
+                w1_lora_b = w1_lora_b[start_idx:end_idx]
+                w2_lora_a = w2_lora_a[start_idx:end_idx]
+                w2_lora_b = w2_lora_b[start_idx:end_idx]
+                w3_lora_a = w3_lora_a[start_idx:end_idx]
+                w3_lora_b = w3_lora_b[start_idx:end_idx]
+        
         assert (
             num_experts
             == w1_lora_a.shape[0]
@@ -685,6 +738,32 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
 
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
+        
+        # In EP mode, filter LoRA weights to only include local experts
+        if self.use_ep:
+            if self.base_layer.expert_map is not None:
+                # Use expert_map to filter experts for this EP rank
+                global_expert_ids = torch.arange(
+                    self.base_layer.global_num_experts,
+                    device=self.device
+                )
+                local_expert_mask = (global_expert_ids // self.ep_size) == self.ep_rank
+                local_global_ids = global_expert_ids[local_expert_mask]
+                
+                w13_lora_a = w13_lora_a[local_expert_mask]
+                w13_lora_b = w13_lora_b[local_expert_mask]
+                w2_lora_a = w2_lora_a[local_expert_mask]
+                w2_lora_b = w2_lora_b[local_expert_mask]
+            else:
+                # Linear expert placement
+                experts_per_rank = self.base_layer.global_num_experts // self.ep_size
+                start_idx = self.ep_rank * experts_per_rank
+                end_idx = start_idx + experts_per_rank
+                
+                w13_lora_a = w13_lora_a[start_idx:end_idx]
+                w13_lora_b = w13_lora_b[start_idx:end_idx]
+                w2_lora_a = w2_lora_a[start_idx:end_idx]
+                w2_lora_b = w2_lora_b[start_idx:end_idx]
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
