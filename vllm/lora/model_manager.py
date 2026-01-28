@@ -498,6 +498,28 @@ class LoRAModelManager:
                         "cpu",
                     )
                     model.loras[module_name + ".base_layer"] = lora
+                elif module.__class__.__name__ == "FusedMoEWithLoRA":
+                    # Handle FusedMoEWithLoRA separately
+                    # w2
+                    lora = LoRALayerWeights.create_dummy_lora_weights(
+                        module_name,
+                        module.w2_input_size,
+                        module.w2_output_size,
+                        rank * module.w2_lora_a_stacked[0].shape[1],  # rank*num_experts
+                        module.w2_lora_a_stacked[0].dtype,
+                        "cpu",
+                    )
+                    model.loras[module_name] = lora
+                    # w13
+                    lora = LoRALayerWeights.create_dummy_lora_weights(
+                        module_name,
+                        module.w13_input_size,
+                        module.w13_output_size,
+                        rank * module.w13_lora_a_stacked[0].shape[1],  # rank*num_experts
+                        module.w13_lora_a_stacked[0].dtype,
+                        "cpu",
+                    )
+                    model.loras[module_name + ".base_layer"] = lora
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,

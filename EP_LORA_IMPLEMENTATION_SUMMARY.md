@@ -34,8 +34,10 @@ if self.use_ep:
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         maybe_make_prepare_finalize,
     )
+    # routing_tables may not be available yet during LoRA initialization
+    routing_tables = getattr(self.base_layer, 'routing_tables', None)
     prepare_finalize = maybe_make_prepare_finalize(
-        self.base_layer, quant_config, self.base_layer.routing_tables
+        self.base_layer, quant_config, routing_tables
     )
     if prepare_finalize is None:
         # Fallback to NoEP if no EP-specific implementation available
@@ -100,6 +102,38 @@ Added clarifying comments about EP mode behavior:
 # In EP mode, local_num_experts already accounts for expert distribution
 # In non-EP mode, local_num_experts equals global_num_experts
 ```
+
+### 5. Fixed Dummy LoRA Creation for MoE
+**File:** `vllm/lora/model_manager.py` (lines 501-522)
+
+Added special handling for `FusedMoEWithLoRA` in dummy LoRA creation to match the structure used for `FusedMoE3DWithLoRA`:
+
+```python
+elif module.__class__.__name__ == "FusedMoEWithLoRA":
+    # Handle FusedMoEWithLoRA separately
+    # w2
+    lora = LoRALayerWeights.create_dummy_lora_weights(
+        module_name,
+        module.w2_input_size,
+        module.w2_output_size,
+        rank * module.w2_lora_a_stacked[0].shape[1],  # rank*num_experts
+        module.w2_lora_a_stacked[0].dtype,
+        "cpu",
+    )
+    model.loras[module_name] = lora
+    # w13
+    lora = LoRALayerWeights.create_dummy_lora_weights(
+        module_name,
+        module.w13_input_size,
+        module.w13_output_size,
+        rank * module.w13_lora_a_stacked[0].shape[1],  # rank*num_experts
+        module.w13_lora_a_stacked[0].dtype,
+        "cpu",
+    )
+    model.loras[module_name + ".base_layer"] = lora
+```
+
+This fixes the `IndexError` that occurred when trying to access `module.lora_a_stacked[i]` for MoE layers during dummy LoRA creation.
 
 ## How It Works
 
