@@ -533,7 +533,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         
         # In EP mode, the LoRA checkpoint contains global expert IDs
         # We need to filter to only the experts local to this EP rank
-        if self.use_ep:
+        # However, if the weights are already sized for local experts (e.g., dummy LoRA),
+        # we skip filtering to avoid double-filtering
+        if self.use_ep and w1_lora_a.shape[0] == self.base_layer.global_num_experts:
             # Get the global expert IDs for this EP rank
             if self.base_layer.expert_map is not None:
                 # expert_map maps global expert IDs to local expert IDs
@@ -744,7 +746,9 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         w13_lora_b, w2_lora_b = lora_b
         
         # In EP mode, filter LoRA weights to only include local experts
-        if self.use_ep:
+        # However, if the weights are already sized for local experts (e.g., dummy LoRA),
+        # we skip filtering to avoid double-filtering
+        if self.use_ep and w13_lora_a.shape[0] == self.base_layer.global_num_experts:
             if self.base_layer.expert_map is not None:
                 # Use expert_map to filter experts for this EP rank
                 # Create mask on the same device as the input weights
