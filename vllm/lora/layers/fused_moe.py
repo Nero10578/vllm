@@ -135,8 +135,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             from vllm.model_executor.layers.fused_moe.all2all_utils import (
                 maybe_make_prepare_finalize,
             )
+            # routing_tables may not be available yet during LoRA initialization
+            routing_tables = getattr(self.base_layer, 'routing_tables', None)
             prepare_finalize = maybe_make_prepare_finalize(
-                self.base_layer, quant_config, self.base_layer.routing_tables
+                self.base_layer, quant_config, routing_tables
             )
             if prepare_finalize is None:
                 # Fallback to NoEP if no EP-specific implementation available
