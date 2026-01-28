@@ -500,24 +500,76 @@ class LoRAModelManager:
                     model.loras[module_name + ".base_layer"] = lora
                 elif module.__class__.__name__ == "FusedMoEWithLoRA":
                     # Handle FusedMoEWithLoRA separately
+                    # For MoE, lora_a and lora_b should be lists of tensors (one per expert)
+                    num_experts = module.w2_lora_a_stacked[0].shape[1]
+                    
+                    # Create w2 LoRA weights as list of expert tensors
+                    w2_lora_a = [
+                        torch.zeros(
+                            (rank, module.w2_input_size),
+                            dtype=module.w2_lora_a_stacked[0].dtype,
+                            device="cpu"
+                        )
+                        for _ in range(num_experts)
+                    ]
+                    w2_lora_b = [
+                        torch.zeros(
+                            (module.w2_output_size, rank),
+                            dtype=module.w2_lora_b_stacked[0].dtype,
+                            device="cpu"
+                        )
+                        for _ in range(num_experts)
+                    ]
+                    
+                    # Create w1 and w3 LoRA weights as list of expert tensors
+                    w1_lora_a = [
+                        torch.zeros(
+                            (rank, module.w13_input_size),
+                            dtype=module.w13_lora_a_stacked[0].dtype,
+                            device="cpu"
+                        )
+                        for _ in range(num_experts)
+                    ]
+                    w1_lora_b = [
+                        torch.zeros(
+                            (module.w13_output_size // 2, rank),
+                            dtype=module.w13_lora_b_stacked[0].dtype,
+                            device="cpu"
+                        )
+                        for _ in range(num_experts)
+                    ]
+                    
+                    w3_lora_a = [
+                        torch.zeros(
+                            (rank, module.w13_input_size),
+                            dtype=module.w13_lora_a_stacked[0].dtype,
+                            device="cpu"
+                        )
+                        for _ in range(num_experts)
+                    ]
+                    w3_lora_b = [
+                        torch.zeros(
+                            (module.w13_output_size // 2, rank),
+                            dtype=module.w13_lora_b_stacked[0].dtype,
+                            device="cpu"
+                        )
+                        for _ in range(num_experts)
+                    ]
+                    
                     # w2
-                    lora = LoRALayerWeights.create_dummy_lora_weights(
+                    lora = LoRALayerWeights(
                         module_name,
-                        module.w2_input_size,
-                        module.w2_output_size,
-                        rank * module.w2_lora_a_stacked[0].shape[1],  # rank*num_experts
-                        module.w2_lora_a_stacked[0].dtype,
-                        "cpu",
+                        lora_a=w2_lora_a,
+                        lora_b=w2_lora_b,
+                        rank=rank,
                     )
                     model.loras[module_name] = lora
-                    # w13
-                    lora = LoRALayerWeights.create_dummy_lora_weights(
-                        module_name,
-                        module.w13_input_size,
-                        module.w13_output_size,
-                        rank * module.w13_lora_a_stacked[0].shape[1],  # rank*num_experts
-                        module.w13_lora_a_stacked[0].dtype,
-                        "cpu",
+                    # w13 (w1 and w3)
+                    lora = LoRALayerWeights(
+                        module_name + ".base_layer",
+                        lora_a=[w1_lora_a, w3_lora_a],
+                        lora_b=[w1_lora_b, w3_lora_b],
+                        rank=rank,
                     )
                     model.loras[module_name + ".base_layer"] = lora
                 else:
