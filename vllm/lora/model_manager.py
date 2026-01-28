@@ -534,17 +534,35 @@ class LoRAModelManager:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
                 subloras: list[LoRALayerWeights | None] = []
-                for i, r in enumerate(replacements):
-                    lora = LoRALayerWeights.create_dummy_lora_weights(
-                        module_name + "." + r,
-                        module.lora_a_stacked[i].shape[-1],
-                        module.lora_b_stacked[i].shape[-2],
-                        rank,
-                        module.lora_a_stacked[i].dtype,
-                        "cpu",
-                    )
-                    subloras.append(lora)
+                
                 if module.__class__.__name__ == "FusedMoEWithLoRA":
+                    # FusedMoEWithLoRA has separate w2 and w13 stacked attributes
+                    # We need to handle them differently
+                    num_experts = len(module.w2_lora_a_stacked)
+                    for i, r in enumerate(replacements):
+                        # Determine which stacked attribute to use based on replacement name
+                        if "w2" in r:
+                            lora_a_stacked = module.w2_lora_a_stacked
+                            lora_b_stacked = module.w2_lora_b_stacked
+                        elif "w1" in r or "w3" in r:
+                            lora_a_stacked = module.w13_lora_a_stacked
+                            lora_b_stacked = module.w13_lora_b_stacked
+                        else:
+                            # Fallback to w13 for unknown replacements
+                            lora_a_stacked = module.w13_lora_a_stacked
+                            lora_b_stacked = module.w13_lora_b_stacked
+                        
+                        # Use the first expert's shape for dummy creation
+                        lora = LoRALayerWeights.create_dummy_lora_weights(
+                            module_name + "." + r,
+                            lora_a_stacked[0].shape[-1],
+                            lora_b_stacked[0].shape[-2],
+                            rank * num_experts,  # rank * num_experts for MoE
+                            lora_a_stacked[0].dtype,
+                            "cpu",
+                        )
+                        subloras.append(lora)
+                    
                     # For non-gated MoE, pad subloras to 3 elements per expert
                     # to match pack_moe expectations (w1, w2, None for w3)
                     if self._is_non_gated_moe and len(subloras) > 0:
@@ -553,6 +571,17 @@ class LoRAModelManager:
                         subloras, module_name, is_non_gated_moe=self._is_non_gated_moe
                     )
                 else:
+                    # Standard non-MoE or FusedMoE3DWithLoRA handling
+                    for i, r in enumerate(replacements):
+                        lora = LoRALayerWeights.create_dummy_lora_weights(
+                            module_name + "." + r,
+                            module.lora_a_stacked[i].shape[-1],
+                            module.lora_b_stacked[i].shape[-2],
+                            rank,
+                            module.lora_a_stacked[i].dtype,
+                            "cpu",
+                        )
+                        subloras.append(lora)
                     lora = PackedLoRALayerWeights.pack(subloras)
                 model.loras[module_name] = lora
         return model
