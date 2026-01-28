@@ -538,9 +538,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             if self.base_layer.expert_map is not None:
                 # expert_map maps global expert IDs to local expert IDs
                 # We need to extract only the experts that belong to this rank
+                # Create mask on the same device as the input weights
+                weight_device = w1_lora_a.device
                 global_expert_ids = torch.arange(
                     self.base_layer.global_num_experts,
-                    device=self.device
+                    device=weight_device
                 )
                 local_expert_mask = (global_expert_ids // self.ep_size) == self.ep_rank
                 local_global_ids = global_expert_ids[local_expert_mask]
@@ -745,9 +747,11 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         if self.use_ep:
             if self.base_layer.expert_map is not None:
                 # Use expert_map to filter experts for this EP rank
+                # Create mask on the same device as the input weights
+                weight_device = w13_lora_a.device
                 global_expert_ids = torch.arange(
                     self.base_layer.global_num_experts,
-                    device=self.device
+                    device=weight_device
                 )
                 local_expert_mask = (global_expert_ids // self.ep_size) == self.ep_rank
                 local_global_ids = global_expert_ids[local_expert_mask]
