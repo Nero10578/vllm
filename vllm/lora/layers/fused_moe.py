@@ -140,8 +140,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        # When EP is enabled, we must use EP-aware kernel initialization
-        # even if the quantization method has a pre-initialized kernel
+        # Check if the quantization method already has a pre-initialized modular kernel
+        # (e.g., for FP8 quantization which uses the new modular kernel initialization logic)
+        has_preinitialized_kernel = (
+            hasattr(self.base_layer.quant_method, 'moe_mk') and
+            self.base_layer.quant_method.moe_mk is not None
+        )
+        
+        # When EP is enabled, we cannot use the pre-initialized kernel even if it exists
+        # because the pre-initialized kernel doesn't support EP
         if self.base_layer.use_ep:
             from vllm.model_executor.layers.fused_moe.prepare_finalize import (
                 MoEPrepareAndFinalizeNaiveEP,
@@ -151,18 +158,21 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 num_dispatchers=1,
             )
             
+            # For EP, we must create a new kernel that supports EP
+            # The quantization methods have been modified to support EP-aware kernel creation
+            gemm_impl = self.base_layer.quant_method.select_gemm_impl(
+                prepare_finalize, self.base_layer
+            )
+            
             m_fused_moe_fn = FusedMoEModularKernel(
                 prepare_finalize,
-                self.base_layer.quant_method.select_gemm_impl(
-                    prepare_finalize, self.base_layer
-                ),
+                gemm_impl,
                 self.base_layer.shared_experts,
                 moe_parallel_config=self.base_layer.moe_parallel_config,
             )
         else:
-            # For non-EP case, check if the quantization method already has a pre-initialized modular kernel
-            # (e.g., for FP8 quantization which uses the new modular kernel initialization logic)
-            if hasattr(self.base_layer.quant_method, 'moe_mk') and self.base_layer.quant_method.moe_mk is not None:
+            # For non-EP case, use the pre-initialized kernel if available
+            if has_preinitialized_kernel:
                 # Use the pre-existing modular kernel
                 m_fused_moe_fn = self.base_layer.quant_method.moe_mk
             else:
