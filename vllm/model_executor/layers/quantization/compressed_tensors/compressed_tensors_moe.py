@@ -592,19 +592,21 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         # For EP support with LoRA, we need to create a compatible kernel implementation
         # The pre-initialized moe_mk doesn't support EP, so we need to create a new one
-        if hasattr(prepare_finalize, 'num_dispatchers') and prepare_finalize.num_dispatchers() > 1:
+        # Check if EP is enabled by looking at the layer's use_ep flag
+        if hasattr(layer, 'use_ep') and layer.use_ep:
             # EP case: we need to create an EP-aware kernel
             # Reuse the existing kernel creation logic but with EP support
             if self.moe_quant_config:
                 assert self.experts_cls is not None
-                # Create a new EP-aware kernel
-                return make_nvfp4_moe_kernel(
+                # Create a new EP-aware kernel using the existing infrastructure
+                kernel = make_nvfp4_moe_kernel(
                     moe_quant_config=self.moe_quant_config,
                     moe_config=self.moe,
                     experts_cls=self.experts_cls,
                     shared_experts=layer.shared_experts,
                     routing_tables=layer._maybe_init_expert_routing_tables(),
                 )
+                return kernel.fused_experts
             else:
                 raise ValueError(
                     f"{self.__class__.__name__} cannot create EP-aware kernel without "
@@ -1008,20 +1010,22 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         # For EP support with LoRA, we need to create a compatible kernel implementation
         # The pre-initialized moe_mk doesn't support EP, so we need to create a new one
-        if hasattr(prepare_finalize, 'num_dispatchers') and prepare_finalize.num_dispatchers() > 1:
+        # Check if EP is enabled by looking at the layer's use_ep flag
+        if hasattr(layer, 'use_ep') and layer.use_ep:
             # EP case: we need to create an EP-aware kernel
             # Reuse the existing kernel creation logic but with EP support
             if self.moe_quant_config:
                 assert self.experts_cls is not None
-                # Create a new EP-aware kernel
-                return make_fp8_moe_kernel(
+                # Create a new EP-aware kernel using the existing infrastructure
+                kernel, _ = make_fp8_moe_kernel(
                     moe_quant_config=self.moe_quant_config,
                     moe_config=self.moe,
                     fp8_backend=self.fp8_backend,
                     experts_cls=self.experts_cls,
                     routing_tables=layer._maybe_init_expert_routing_tables(),
                     shared_experts=layer.shared_experts,
-                )[0]  # Return the kernel part, not the tuple
+                )
+                return kernel.fused_experts
             else:
                 raise ValueError(
                     f"{self.__class__.__name__} cannot create EP-aware kernel without "
