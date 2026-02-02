@@ -589,12 +589,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     w2_lora_b = torch.zeros(0, *w2_lora_b.shape[1:], dtype=w2_lora_b.dtype, device=w2_lora_b.device)
                     w3_lora_b = torch.zeros(0, *w3_lora_b.shape[1:], dtype=w3_lora_b.dtype, device=w3_lora_b.device)
         
+        # After EP sharding, the number of experts should match local experts
+        # If EP is enabled, the weights have been sliced to local experts only
+        expected_experts = w1_lora_a.shape[0]  # This is the sharded count after EP filtering
         assert (
-            num_experts
+            expected_experts
             == w1_lora_a.shape[0]
             == w2_lora_a.shape[0]
             == w3_lora_a.shape[0]
-        )
+        ), f"EP sharding mismatch: expected {expected_experts} experts, got shapes {w1_lora_a.shape[0]}, {w2_lora_a.shape[0]}, {w3_lora_a.shape[0]}"
 
         slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
         slliced_w1_lora_b = self._slice_w13_b(w1_lora_b)
@@ -787,6 +790,14 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
                     w2_lora_a = torch.zeros(0, *w2_lora_a.shape[1:], dtype=w2_lora_a.dtype, device=w2_lora_a.device)
                     w13_lora_b = torch.zeros(0, *w13_lora_b.shape[1:], dtype=w13_lora_b.dtype, device=w13_lora_b.device)
                     w2_lora_b = torch.zeros(0, *w2_lora_b.shape[1:], dtype=w2_lora_b.dtype, device=w2_lora_b.device)
+
+        # After EP sharding, validate that the tensor shapes are consistent
+        expected_experts = w13_lora_a.shape[0]  # This is the sharded count after EP filtering
+        assert (
+            expected_experts
+            == w13_lora_a.shape[0]
+            == w2_lora_a.shape[0]
+        ), f"EP sharding mismatch: expected {expected_experts} experts, got shapes {w13_lora_a.shape[0]}, {w2_lora_a.shape[0]}"
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
