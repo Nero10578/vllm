@@ -500,61 +500,43 @@ class LoRAModelManager:
                     model.loras[module_name + ".base_layer"] = lora
                 elif module.__class__.__name__ == "FusedMoEWithLoRA":
                     # Handle FusedMoEWithLoRA separately
-                    # For MoE, lora_a and lora_b should be lists of tensors (one per expert)
+                    # For MoE, lora_a and lora_b should be single tensors with shape (num_experts, rank, input_size)
                     num_experts = module.w2_lora_a_stacked[0].shape[1]
                     
-                    # Create w2 LoRA weights as list of expert tensors
-                    w2_lora_a = [
-                        torch.zeros(
-                            (rank, module.w2_input_size),
-                            dtype=module.w2_lora_a_stacked[0].dtype,
-                            device="cpu"
-                        )
-                        for _ in range(num_experts)
-                    ]
-                    w2_lora_b = [
-                        torch.zeros(
-                            (module.w2_output_size, rank),
-                            dtype=module.w2_lora_b_stacked[0].dtype,
-                            device="cpu"
-                        )
-                        for _ in range(num_experts)
-                    ]
+                    # Create w2 LoRA weights as single tensor with shape (num_experts, rank, input_size)
+                    w2_lora_a = torch.zeros(
+                        (num_experts, rank, module.w2_input_size),
+                        dtype=module.w2_lora_a_stacked[0].dtype,
+                        device="cpu"
+                    )
+                    w2_lora_b = torch.zeros(
+                        (num_experts, module.w2_output_size, rank),
+                        dtype=module.w2_lora_b_stacked[0].dtype,
+                        device="cpu"
+                    )
                     
-                    # Create w1 and w3 LoRA weights as list of expert tensors
-                    w1_lora_a = [
-                        torch.zeros(
-                            (rank, module.w13_input_size),
-                            dtype=module.w13_lora_a_stacked[0].dtype,
-                            device="cpu"
-                        )
-                        for _ in range(num_experts)
-                    ]
-                    w1_lora_b = [
-                        torch.zeros(
-                            (module.w13_output_size // 2, rank),
-                            dtype=module.w13_lora_b_stacked[0].dtype,
-                            device="cpu"
-                        )
-                        for _ in range(num_experts)
-                    ]
+                    # Create w1 and w3 LoRA weights as single tensors
+                    w1_lora_a = torch.zeros(
+                        (num_experts, rank, module.w13_input_size),
+                        dtype=module.w13_lora_a_stacked[0].dtype,
+                        device="cpu"
+                    )
+                    w1_lora_b = torch.zeros(
+                        (num_experts, module.w13_output_size // 2, rank),
+                        dtype=module.w13_lora_b_stacked[0].dtype,
+                        device="cpu"
+                    )
                     
-                    w3_lora_a = [
-                        torch.zeros(
-                            (rank, module.w13_input_size),
-                            dtype=module.w13_lora_a_stacked[0].dtype,
-                            device="cpu"
-                        )
-                        for _ in range(num_experts)
-                    ]
-                    w3_lora_b = [
-                        torch.zeros(
-                            (module.w13_output_size // 2, rank),
-                            dtype=module.w13_lora_b_stacked[0].dtype,
-                            device="cpu"
-                        )
-                        for _ in range(num_experts)
-                    ]
+                    w3_lora_a = torch.zeros(
+                        (num_experts, rank, module.w13_input_size),
+                        dtype=module.w13_lora_a_stacked[0].dtype,
+                        device="cpu"
+                    )
+                    w3_lora_b = torch.zeros(
+                        (num_experts, module.w13_output_size // 2, rank),
+                        dtype=module.w13_lora_b_stacked[0].dtype,
+                        device="cpu"
+                    )
                     
                     # w2
                     lora = LoRALayerWeights(
