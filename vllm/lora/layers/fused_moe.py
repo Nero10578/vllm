@@ -140,23 +140,16 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        # Check if the quantization method already has a pre-initialized modular kernel
-        # (e.g., for FP8 quantization which uses the new modular kernel initialization logic)
-        if hasattr(self.base_layer.quant_method, 'moe_mk') and self.base_layer.quant_method.moe_mk is not None:
-            # Use the pre-existing modular kernel
-            m_fused_moe_fn = self.base_layer.quant_method.moe_mk
-        else:
-            # Use the appropriate prepare_finalize based on whether EP is enabled
-            if self.base_layer.use_ep:
-                from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-                    MoEPrepareAndFinalizeNaiveEP,
-                )
-                prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
-                    is_sequence_parallel=self.base_layer.is_sequence_parallel,
-                    num_dispatchers=1,
-                )
-            else:
-                prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        # When EP is enabled, we must use EP-aware kernel initialization
+        # even if the quantization method has a pre-initialized kernel
+        if self.base_layer.use_ep:
+            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                MoEPrepareAndFinalizeNaiveEP,
+            )
+            prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
+                is_sequence_parallel=self.base_layer.is_sequence_parallel,
+                num_dispatchers=1,
+            )
             
             m_fused_moe_fn = FusedMoEModularKernel(
                 prepare_finalize,
@@ -166,6 +159,24 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.base_layer.shared_experts,
                 moe_parallel_config=self.base_layer.moe_parallel_config,
             )
+        else:
+            # For non-EP case, check if the quantization method already has a pre-initialized modular kernel
+            # (e.g., for FP8 quantization which uses the new modular kernel initialization logic)
+            if hasattr(self.base_layer.quant_method, 'moe_mk') and self.base_layer.quant_method.moe_mk is not None:
+                # Use the pre-existing modular kernel
+                m_fused_moe_fn = self.base_layer.quant_method.moe_mk
+            else:
+                # Use the standard NoEP prepare_finalize
+                prepare_finalize = MoEPrepareAndFinalizeNoEP()
+                
+                m_fused_moe_fn = FusedMoEModularKernel(
+                    prepare_finalize,
+                    self.base_layer.quant_method.select_gemm_impl(
+                        prepare_finalize, self.base_layer
+                    ),
+                    self.base_layer.shared_experts,
+                    moe_parallel_config=self.base_layer.moe_parallel_config,
+                )
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
                 m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)

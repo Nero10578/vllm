@@ -19,33 +19,26 @@ The issues stemmed from incompatibilities between:
 
 ## Complete Fix Implementation
 
-### Fix 1: FP8 Quantization Compatibility
+### Fix 1: EP-Aware Kernel Initialization (Critical Fix)
 
 **File**: `vllm/lora/layers/fused_moe.py`
 **Method**: `_inject_lora_into_fused_moe()`
 
-**Problem**: LoRA injection code unconditionally called `select_gemm_impl()`, which FP8/NVFP4 quantization methods don't support.
+**Problem**: When EP is enabled, FP8 quantization methods were using pre-initialized kernels that don't support EP, leading to CUDA illegal memory access errors during graph capture.
 
-**Solution**: Added conditional check to use pre-initialized `moe_mk` kernel if available:
+**Solution**: Reordered the conditional logic to prioritize EP-aware kernel initialization when EP is enabled, regardless of whether a pre-initialized kernel exists:
 
 ```python
-# Check if the quantization method already has a pre-initialized modular kernel
-# (e.g., for FP8 quantization which uses the new modular kernel initialization logic)
-if hasattr(self.base_layer.quant_method, 'moe_mk') and self.base_layer.quant_method.moe_mk is not None:
-    # Use the pre-existing modular kernel
-    m_fused_moe_fn = self.base_layer.quant_method.moe_mk
-else:
-    # Use the appropriate prepare_finalize based on whether EP is enabled
-    if self.base_layer.use_ep:
-        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-            MoEPrepareAndFinalizeNaiveEP,
-        )
-        prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
-            is_sequence_parallel=self.base_layer.is_sequence_parallel,
-            num_dispatchers=1,
-        )
-    else:
-        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+# When EP is enabled, we must use EP-aware kernel initialization
+# even if the quantization method has a pre-initialized kernel
+if self.base_layer.use_ep:
+    from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+        MoEPrepareAndFinalizeNaiveEP,
+    )
+    prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
+        is_sequence_parallel=self.base_layer.is_sequence_parallel,
+        num_dispatchers=1,
+    )
     
     m_fused_moe_fn = FusedMoEModularKernel(
         prepare_finalize,
@@ -55,13 +48,33 @@ else:
         self.base_layer.shared_experts,
         moe_parallel_config=self.base_layer.moe_parallel_config,
     )
+else:
+    # For non-EP case, check if the quantization method already has a pre-initialized modular kernel
+    # (e.g., for FP8 quantization which uses the new modular kernel initialization logic)
+    if hasattr(self.base_layer.quant_method, 'moe_mk') and self.base_layer.quant_method.moe_mk is not None:
+        # Use the pre-existing modular kernel
+        m_fused_moe_fn = self.base_layer.quant_method.moe_mk
+    else:
+        # Use the standard NoEP prepare_finalize
+        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        
+        m_fused_moe_fn = FusedMoEModularKernel(
+            prepare_finalize,
+            self.base_layer.quant_method.select_gemm_impl(
+                prepare_finalize, self.base_layer
+            ),
+            self.base_layer.shared_experts,
+            moe_parallel_config=self.base_layer.moe_parallel_config,
+        )
 ```
 
-### Fix 2: EP-Aware Kernel Initialization
+**Key Insight**: EP compatibility must take precedence over quantization method optimizations. The pre-initialized FP8 kernels are not EP-aware and cause memory access violations when used with EP.
 
-**Problem**: LoRA injection code hardcoded `MoEPrepareAndFinalizeNoEP()` which doesn't support EP.
+### Fix 2: FP8 Quantization Compatibility (Non-EP Case)
 
-**Solution**: Use `MoEPrepareAndFinalizeNaiveEP` when EP is enabled and pass `moe_parallel_config` to `FusedMoEModularKernel`.
+**Problem**: For non-EP cases, LoRA injection code unconditionally called `select_gemm_impl()`, which FP8/NVFP4 quantization methods don't support.
+
+**Solution**: Maintained backward compatibility by using pre-initialized `moe_mk` kernel for non-EP FP8 quantization cases.
 
 ### Fix 3: EP-Aware LoRA Weight Sharding
 
