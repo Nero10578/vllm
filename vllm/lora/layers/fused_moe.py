@@ -605,34 +605,71 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
         sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
 
-        self.w13_lora_a_stacked[0][
-            index, :, : slliced_w1_lora_a.shape[1], : slliced_w1_lora_a.shape[2]
-        ].copy_(slliced_w1_lora_a, non_blocking=True)
+        # Handle EP sharding: the target tensors have local_num_experts dimensions
+        # but after EP filtering, the source tensors have the actual local expert count
+        target_experts = self.w13_lora_a_stacked[0].shape[1]
+        source_experts = slliced_w1_lora_a.shape[0]
+        
+        # If EP is enabled and we have fewer source experts than target experts,
+        # we need to pad or adjust the copying
+        if self.ep_size > 1 and source_experts != target_experts:
+            # Only copy the experts that exist after EP sharding
+            if source_experts > 0:
+                self.w13_lora_a_stacked[0][
+                    index, :source_experts, : slliced_w1_lora_a.shape[1], : slliced_w1_lora_a.shape[2]
+                ].copy_(slliced_w1_lora_a, non_blocking=True)
+                self.w13_lora_b_stacked[0][
+                    index, :source_experts, : slliced_w1_lora_b.shape[1], : slliced_w1_lora_b.shape[2]
+                ].copy_(slliced_w1_lora_b, non_blocking=True)
+                
+                # Only copy w3 (up_proj) for gated MoE (_w13_slices == 2)
+                if self._w13_slices == 2:
+                    slliced_w3_lora_a = self._slice_w13_a(w3_lora_a)
+                    slliced_w3_lora_b = self._slice_w13_b(w3_lora_b)
+                    
+                    self.w13_lora_a_stacked[1][
+                        index, :source_experts, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
+                    ].copy_(slliced_w3_lora_a, non_blocking=True)
+                    self.w13_lora_b_stacked[1][
+                        index, :source_experts, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
+                    ].copy_(slliced_w3_lora_b, non_blocking=True)
+                
+                self.w2_lora_a_stacked[0][
+                    index, :source_experts, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+                ].copy_(sliced_w2_lora_a, non_blocking=True)
+                self.w2_lora_b_stacked[0][
+                    index, :source_experts, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
+                ].copy_(sliced_w2_lora_b, non_blocking=True)
+        else:
+            # Normal copying without EP sharding
+            self.w13_lora_a_stacked[0][
+                index, :, : slliced_w1_lora_a.shape[1], : slliced_w1_lora_a.shape[2]
+            ].copy_(slliced_w1_lora_a, non_blocking=True)
 
-        self.w13_lora_b_stacked[0][
-            index, :, : slliced_w1_lora_b.shape[1], : slliced_w1_lora_b.shape[2]
-        ].copy_(slliced_w1_lora_b, non_blocking=True)
+            self.w13_lora_b_stacked[0][
+                index, :, : slliced_w1_lora_b.shape[1], : slliced_w1_lora_b.shape[2]
+            ].copy_(slliced_w1_lora_b, non_blocking=True)
 
-        # Only copy w3 (up_proj) for gated MoE (_w13_slices == 2)
-        if self._w13_slices == 2:
-            slliced_w3_lora_a = self._slice_w13_a(w3_lora_a)
-            slliced_w3_lora_b = self._slice_w13_b(w3_lora_b)
+            # Only copy w3 (up_proj) for gated MoE (_w13_slices == 2)
+            if self._w13_slices == 2:
+                slliced_w3_lora_a = self._slice_w13_a(w3_lora_a)
+                slliced_w3_lora_b = self._slice_w13_b(w3_lora_b)
 
-            self.w13_lora_a_stacked[1][
-                index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
-            ].copy_(slliced_w3_lora_a, non_blocking=True)
+                self.w13_lora_a_stacked[1][
+                    index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
+                ].copy_(slliced_w3_lora_a, non_blocking=True)
 
-            self.w13_lora_b_stacked[1][
-                index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
-            ].copy_(slliced_w3_lora_b, non_blocking=True)
+                self.w13_lora_b_stacked[1][
+                    index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
+                ].copy_(slliced_w3_lora_b, non_blocking=True)
 
-        self.w2_lora_a_stacked[0][
-            index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
-        ].copy_(sliced_w2_lora_a, non_blocking=True)
+            self.w2_lora_a_stacked[0][
+                index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+            ].copy_(sliced_w2_lora_a, non_blocking=True)
 
-        self.w2_lora_b_stacked[0][
-            index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
-        ].copy_(sliced_w2_lora_b, non_blocking=True)
+            self.w2_lora_b_stacked[0][
+                index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
+            ].copy_(sliced_w2_lora_b, non_blocking=True)
 
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
@@ -805,19 +842,43 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
         sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
 
-        self.w13_lora_a_stacked[0][
-            index, :, : sliced_w13_lora_a.shape[1], : sliced_w13_lora_a.shape[2]
-        ].copy_(sliced_w13_lora_a, non_blocking=True)
-        self.w2_lora_a_stacked[0][
-            index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
-        ].copy_(sliced_w2_lora_a, non_blocking=True)
+        # Handle EP sharding: the target tensors have local_num_experts dimensions
+        # but after EP filtering, the source tensors have the actual local expert count
+        target_experts = self.w13_lora_a_stacked[0].shape[1]
+        source_experts = sliced_w13_lora_a.shape[0]
+        
+        # If EP is enabled and we have fewer source experts than target experts,
+        # we need to pad or adjust the copying
+        if self.ep_size > 1 and source_experts != target_experts:
+            # Only copy the experts that exist after EP sharding
+            if source_experts > 0:
+                self.w13_lora_a_stacked[0][
+                    index, :source_experts, : sliced_w13_lora_a.shape[1], : sliced_w13_lora_a.shape[2]
+                ].copy_(sliced_w13_lora_a, non_blocking=True)
+                self.w2_lora_a_stacked[0][
+                    index, :source_experts, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+                ].copy_(sliced_w2_lora_a, non_blocking=True)
+                self.w13_lora_b_stacked[0][
+                    index, :source_experts, : sliced_w13_lora_b.shape[1], : sliced_w13_lora_b.shape[2]
+                ].copy_(sliced_w13_lora_b, non_blocking=True)
+                self.w2_lora_b_stacked[0][
+                    index, :source_experts, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
+                ].copy_(sliced_w2_lora_b, non_blocking=True)
+        else:
+            # Normal copying without EP sharding
+            self.w13_lora_a_stacked[0][
+                index, :, : sliced_w13_lora_a.shape[1], : sliced_w13_lora_a.shape[2]
+            ].copy_(sliced_w13_lora_a, non_blocking=True)
+            self.w2_lora_a_stacked[0][
+                index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]
+            ].copy_(sliced_w2_lora_a, non_blocking=True)
 
-        self.w13_lora_b_stacked[0][
-            index, :, : sliced_w13_lora_b.shape[1], : sliced_w13_lora_b.shape[2]
-        ].copy_(sliced_w13_lora_b, non_blocking=True)
-        self.w2_lora_b_stacked[0][
-            index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
-        ].copy_(sliced_w2_lora_b, non_blocking=True)
+            self.w13_lora_b_stacked[0][
+                index, :, : sliced_w13_lora_b.shape[1], : sliced_w13_lora_b.shape[2]
+            ].copy_(sliced_w13_lora_b, non_blocking=True)
+            self.w2_lora_b_stacked[0][
+                index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
+            ].copy_(sliced_w2_lora_b, non_blocking=True)
 
     @property
     def w13_input_size(self):
