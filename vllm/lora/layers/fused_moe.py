@@ -12,8 +12,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 from vllm.distributed.parallel_state import (
-    get_ep_rank,
-    get_ep_size,
+    get_ep_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -53,8 +52,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.ep_size = get_ep_size()
-        self.ep_rank = get_ep_rank()
+        # Get EP size and rank from the EP group
+        try:
+            ep_group = get_ep_group()
+            self.ep_size = ep_group.world_size
+            self.ep_rank = ep_group.rank_in_group
+        except AssertionError:
+            # EP group not initialized (non-MoE model or EP not enabled)
+            self.ep_size = 1
+            self.ep_rank = 0
         self.device = _get_lora_device(base_layer)
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
