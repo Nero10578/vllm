@@ -12,6 +12,8 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 from vllm.distributed.parallel_state import (
+    get_ep_rank,
+    get_ep_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -51,6 +53,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
+        self.ep_size = get_ep_size()
+        self.ep_rank = get_ep_rank()
         self.device = _get_lora_device(base_layer)
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
@@ -548,6 +552,37 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+        
+        # When EP is enabled, slice LoRA weights to only include local experts
+        if self.ep_size > 1:
+            expert_map = self.base_layer.expert_map
+            if expert_map is not None:
+                # expert_map maps global expert indices to local expert indices
+                # -1 means the expert is not on this rank
+                # We need to filter to only include experts that are local to this rank
+                local_expert_indices = []
+                for global_expert_idx in range(w1_lora_a.shape[0]):
+                    local_expert_idx = expert_map[global_expert_idx].item()
+                    if local_expert_idx != -1:
+                        local_expert_indices.append(global_expert_idx)
+                
+                # Slice to only include local experts
+                if local_expert_indices:
+                    w1_lora_a = w1_lora_a[local_expert_indices]
+                    w2_lora_a = w2_lora_a[local_expert_indices]
+                    w3_lora_a = w3_lora_a[local_expert_indices]
+                    w1_lora_b = w1_lora_b[local_expert_indices]
+                    w2_lora_b = w2_lora_b[local_expert_indices]
+                    w3_lora_b = w3_lora_b[local_expert_indices]
+                else:
+                    # No local experts, create empty tensors
+                    w1_lora_a = torch.zeros(0, *w1_lora_a.shape[1:], dtype=w1_lora_a.dtype, device=w1_lora_a.device)
+                    w2_lora_a = torch.zeros(0, *w2_lora_a.shape[1:], dtype=w2_lora_a.dtype, device=w2_lora_a.device)
+                    w3_lora_a = torch.zeros(0, *w3_lora_a.shape[1:], dtype=w3_lora_a.dtype, device=w3_lora_a.device)
+                    w1_lora_b = torch.zeros(0, *w1_lora_b.shape[1:], dtype=w1_lora_b.dtype, device=w1_lora_b.device)
+                    w2_lora_b = torch.zeros(0, *w2_lora_b.shape[1:], dtype=w2_lora_b.dtype, device=w2_lora_b.device)
+                    w3_lora_b = torch.zeros(0, *w3_lora_b.shape[1:], dtype=w3_lora_b.dtype, device=w3_lora_b.device)
+        
         assert (
             num_experts
             == w1_lora_a.shape[0]
@@ -720,6 +755,32 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
 
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
+        
+        # When EP is enabled, slice LoRA weights to only include local experts
+        if self.ep_size > 1:
+            expert_map = self.base_layer.expert_map
+            if expert_map is not None:
+                # expert_map maps global expert indices to local expert indices
+                # -1 means the expert is not on this rank
+                # We need to filter to only include experts that are local to this rank
+                local_expert_indices = []
+                for global_expert_idx in range(w13_lora_a.shape[0]):
+                    local_expert_idx = expert_map[global_expert_idx].item()
+                    if local_expert_idx != -1:
+                        local_expert_indices.append(global_expert_idx)
+                
+                # Slice to only include local experts
+                if local_expert_indices:
+                    w13_lora_a = w13_lora_a[local_expert_indices]
+                    w2_lora_a = w2_lora_a[local_expert_indices]
+                    w13_lora_b = w13_lora_b[local_expert_indices]
+                    w2_lora_b = w2_lora_b[local_expert_indices]
+                else:
+                    # No local experts, create empty tensors
+                    w13_lora_a = torch.zeros(0, *w13_lora_a.shape[1:], dtype=w13_lora_a.dtype, device=w13_lora_a.device)
+                    w2_lora_a = torch.zeros(0, *w2_lora_a.shape[1:], dtype=w2_lora_a.dtype, device=w2_lora_a.device)
+                    w13_lora_b = torch.zeros(0, *w13_lora_b.shape[1:], dtype=w13_lora_b.dtype, device=w13_lora_b.device)
+                    w2_lora_b = torch.zeros(0, *w2_lora_b.shape[1:], dtype=w2_lora_b.dtype, device=w2_lora_b.device)
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)

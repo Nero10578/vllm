@@ -75,6 +75,8 @@ else:
 
 ### Fix 2: Expert Parallel Support
 
+#### Part A: EP-Aware Kernel Initialization
+
 Modified `FusedMoEWithLoRA._inject_lora_into_fused_moe()` to use the appropriate prepare/finalize logic based on whether EP is enabled:
 
 ```python
@@ -100,6 +102,42 @@ m_fused_moe_fn = FusedMoEModularKernel(
 )
 ```
 
+#### Part B: EP-Aware LoRA Weight Sharding
+
+Modified `FusedMoEWithLoRA.set_lora()` and `FusedMoE3DWithLoRA.set_lora()` to slice LoRA weights based on the EP rank:
+
+```python
+# When EP is enabled, slice LoRA weights to only include local experts
+if self.ep_size > 1:
+    expert_map = self.base_layer.expert_map
+    if expert_map is not None:
+        # expert_map maps global expert indices to local expert indices
+        # -1 means the expert is not on this rank
+        # We need to filter to only include experts that are local to this rank
+        local_expert_indices = []
+        for global_expert_idx in range(w1_lora_a.shape[0]):
+            local_expert_idx = expert_map[global_expert_idx].item()
+            if local_expert_idx != -1:
+                local_expert_indices.append(global_expert_idx)
+        
+        # Slice to only include local experts
+        if local_expert_indices:
+            w1_lora_a = w1_lora_a[local_expert_indices]
+            w2_lora_a = w2_lora_a[local_expert_indices]
+            w3_lora_a = w3_lora_a[local_expert_indices]
+            w1_lora_b = w1_lora_b[local_expert_indices]
+            w2_lora_b = w2_lora_b[local_expert_indices]
+            w3_lora_b = w3_lora_b[local_expert_indices]
+        else:
+            # No local experts, create empty tensors
+            w1_lora_a = torch.zeros(0, *w1_lora_a.shape[1:], dtype=w1_lora_a.dtype, device=w1_lora_a.device)
+            w2_lora_a = torch.zeros(0, *w2_lora_a.shape[1:], dtype=w2_lora_a.dtype, device=w2_lora_a.device)
+            w3_lora_a = torch.zeros(0, *w3_lora_a.shape[1:], dtype=w3_lora_a.dtype, device=w3_lora_a.device)
+            w1_lora_b = torch.zeros(0, *w1_lora_b.shape[1:], dtype=w1_lora_b.dtype, device=w1_lora_b.device)
+            w2_lora_b = torch.zeros(0, *w2_lora_b.shape[1:], dtype=w2_lora_b.dtype, device=w2_lora_b.device)
+            w3_lora_b = torch.zeros(0, *w3_lora_b.shape[1:], dtype=w3_lora_b.dtype, device=w3_lora_b.device)
+```
+
 Also removed the assertion that rejected EP mode and removed the workaround in `can_replace_layer()` that skipped LoRA for MoE layers.
 
 ## Impact
@@ -123,7 +161,7 @@ The `moe_parallel_config` parameter ensures that the modular kernel has access t
 
 ## Files Modified
 
-- `vllm/lora/layers/fused_moe.py` - Modified `_inject_lora_into_fused_moe()` method, removed EP assertion, and updated `can_replace_layer()` methods
+- `vllm/lora/layers/fused_moe.py` - Modified `_inject_lora_into_fused_moe()`, `set_lora()` methods, added EP rank tracking, removed EP assertion, and updated `can_replace_layer()` methods
 
 ## Testing
 
