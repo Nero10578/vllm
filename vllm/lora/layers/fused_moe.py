@@ -8,6 +8,9 @@ from transformers import PretrainedConfig
 
 from vllm import envs
 from vllm.config.lora import LoRAConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -46,9 +49,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
@@ -136,14 +136,25 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             # Use the pre-existing modular kernel
             m_fused_moe_fn = self.base_layer.quant_method.moe_mk
         else:
-            # Use the old initialization logic for quantization methods that support it
-            prepare_finalize = MoEPrepareAndFinalizeNoEP()
+            # Use the appropriate prepare_finalize based on whether EP is enabled
+            if self.base_layer.use_ep:
+                from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                    MoEPrepareAndFinalizeNaiveEP,
+                )
+                prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
+                    is_sequence_parallel=self.base_layer.is_sequence_parallel,
+                    num_dispatchers=1,
+                )
+            else:
+                prepare_finalize = MoEPrepareAndFinalizeNoEP()
+            
             m_fused_moe_fn = FusedMoEModularKernel(
                 prepare_finalize,
                 self.base_layer.quant_method.select_gemm_impl(
                     prepare_finalize, self.base_layer
                 ),
                 self.base_layer.shared_experts,
+                moe_parallel_config=self.base_layer.moe_parallel_config,
             )
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
@@ -606,8 +617,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-
-        # source_layer is FusedMoE or SharedFusedMoE
         return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 2
 
 
@@ -769,5 +778,4 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        # source_layer is FusedMoE or SharedFusedMoE
         return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 1
