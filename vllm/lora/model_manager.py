@@ -508,28 +508,47 @@ class LoRAModelManager:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
                 subloras: list[LoRALayerWeights | None] = []
-                for i, r in enumerate(replacements):
-                    lora = LoRALayerWeights.create_dummy_lora_weights(
-                        module_name + "." + r,
-                        module.lora_a_stacked[i].shape[-1],
-                        module.lora_b_stacked[i].shape[-2],
-                        rank,
-                        module.lora_a_stacked[i].dtype,
-                        "cpu",
-                    )
-                    subloras.append(lora)
+                
+                # Get expert_map for EP mode filtering
+                expert_map = None
+                if hasattr(module, "base_layer") and hasattr(module.base_layer, "expert_map"):
+                    expert_map = module.base_layer.expert_map
+                
+                # Determine which experts to create dummy weights for
+                # In EP mode, only create dummy weights for local experts to match
+                # the memory layout that will be used during inference
+                num_experts_per_replacement = len(replacements)
+                if expert_map is not None:
+                    # In EP mode, only create dummy weights for local experts
+                    local_expert_indices = [i for i in range(expert_map.shape[0]) if expert_map[i] >= 0]
+                    num_local_experts = len(local_expert_indices)
+                else:
+                    # In non-EP mode, create dummy weights for all experts
+                    local_expert_indices = list(range(num_experts_per_replacement))
+                    num_local_experts = num_experts_per_replacement
+                
+                # Create dummy weights only for local experts
+                for local_expert_idx in local_expert_indices:
+                    for i, r in enumerate(replacements):
+                        lora = LoRALayerWeights.create_dummy_lora_weights(
+                            module_name + "." + r,
+                            module.lora_a_stacked[i].shape[-1],
+                            module.lora_b_stacked[i].shape[-2],
+                            rank,
+                            module.lora_a_stacked[i].dtype,
+                            "cpu",
+                        )
+                        subloras.append(lora)
+                
                 if module.__class__.__name__ == "FusedMoEWithLoRA":
                     # For non-gated MoE, pad subloras to 3 elements per expert
                     # to match pack_moe expectations (w1, w2, None for w3)
                     if self._is_non_gated_moe and len(subloras) > 0:
                         subloras = self._pad_lora_pairs_to_triplets(subloras)
-                    # Get expert_map for EP mode filtering
-                    expert_map = None
-                    if hasattr(module, "base_layer") and hasattr(module.base_layer, "expert_map"):
-                        expert_map = module.base_layer.expert_map
+                    # Pack without expert_map since we already filtered to local experts
                     lora = PackedLoRALayerWeights.pack_moe(
                         subloras, module_name, is_non_gated_moe=self._is_non_gated_moe,
-                        expert_map=expert_map
+                        expert_map=None  # Already filtered to local experts
                     )
                 else:
                     lora = PackedLoRALayerWeights.pack(subloras)
