@@ -157,10 +157,19 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         loras: GenericSequence["LoRALayerWeights | None"],
         module_name: str,
         is_non_gated_moe: bool = False,
+        expert_map: torch.Tensor | None = None,
     ) -> "PackedLoRALayerWeights":
         """Pack a list of LoRAs into a single LoRA.
 
         If LoRA is None, it signifies that the submodule does not have a LoRA.
+
+        Args:
+            loras: List of LoRA weights for each expert (w1, w2, w3 triplets).
+            module_name: Name of the module.
+            is_non_gated_moe: Whether this is a non-gated MoE model.
+            expert_map: Optional tensor mapping global expert IDs to local expert IDs.
+                        If provided, only experts with non-negative local IDs are packed.
+                        Used for Expert Parallel (EP) mode.
         """
 
         first_lora = next(lora for lora in loras if lora is not None)
@@ -174,8 +183,18 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         w1_lora_b_lst = []
         w2_lora_b_lst = []
         w3_lora_b_lst = []
+        
+        # Determine which experts to pack
+        num_experts = len(loras) // 3
+        if expert_map is not None:
+            # In EP mode, only pack local experts
+            expert_indices = [i for i in range(num_experts) if expert_map[i] >= 0]
+        else:
+            # In non-EP mode, pack all experts
+            expert_indices = list(range(num_experts))
+        
         # TODO: Consider the case where some experts don't have LoRA added.
-        for eid in range(len(loras) // 3):
+        for eid in expert_indices:
             w1_lora = loras[eid * 3]
             w2_lora = loras[eid * 3 + 1]
             w3_lora = loras[eid * 3 + 2]

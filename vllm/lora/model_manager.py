@@ -523,8 +523,13 @@ class LoRAModelManager:
                     # to match pack_moe expectations (w1, w2, None for w3)
                     if self._is_non_gated_moe and len(subloras) > 0:
                         subloras = self._pad_lora_pairs_to_triplets(subloras)
+                    # Get expert_map for EP mode filtering
+                    expert_map = None
+                    if hasattr(module, "base_layer") and hasattr(module.base_layer, "expert_map"):
+                        expert_map = module.base_layer.expert_map
                     lora = PackedLoRALayerWeights.pack_moe(
-                        subloras, module_name, is_non_gated_moe=self._is_non_gated_moe
+                        subloras, module_name, is_non_gated_moe=self._is_non_gated_moe,
+                        expert_map=expert_map
                     )
                 else:
                     lora = PackedLoRALayerWeights.pack(subloras)
@@ -597,10 +602,17 @@ class LoRAModelManager:
                     replacement_loras = self._pad_lora_pairs_to_triplets(
                         replacement_loras
                     )
+                # Get expert_map for EP mode filtering
+                expert_map = None
+                if module_name in self.modules:
+                    module = self.modules[module_name]
+                    if hasattr(module, "base_layer") and hasattr(module.base_layer, "expert_map"):
+                        expert_map = module.base_layer.expert_map
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
                     replacement_loras,
                     module_name,
                     is_non_gated_moe=self._is_non_gated_moe,
+                    expert_map=expert_map,
                 )
             else:
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
