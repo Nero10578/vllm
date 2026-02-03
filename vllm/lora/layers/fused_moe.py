@@ -554,24 +554,23 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
         
-        # Check if LoRA weights need filtering for EP mode
-        # If LoRA weights already have local_num_experts, they were already filtered during packing
-        if (
-            self.base_layer.use_ep
-            and self.base_layer._expert_map is not None
-            and w1_lora_a.shape[0] != local_num_experts
-        ):
+        # Always filter LoRA weights for EP mode to ensure consistency
+        # between dummy weights (created during CUDA graph capture) and real weights
+        if self.base_layer.use_ep and self.base_layer._expert_map is not None:
             expert_map = self.base_layer._expert_map
             # Filter to only include experts that are local to this rank
             # expert_map[i] gives the local expert index for global expert i, or -1 if not local
             local_expert_indices = [i for i in range(expert_map.shape[0]) if expert_map[i] >= 0]
             
-            w1_lora_a = w1_lora_a[local_expert_indices]
-            w2_lora_a = w2_lora_a[local_expert_indices]
-            w3_lora_a = w3_lora_a[local_expert_indices]
-            w1_lora_b = w1_lora_b[local_expert_indices]
-            w2_lora_b = w2_lora_b[local_expert_indices]
-            w3_lora_b = w3_lora_b[local_expert_indices]
+            # Only filter if the weights contain more experts than local experts
+            # This handles both cases: unfiltered weights and already-filtered weights
+            if w1_lora_a.shape[0] > local_num_experts:
+                w1_lora_a = w1_lora_a[local_expert_indices]
+                w2_lora_a = w2_lora_a[local_expert_indices]
+                w3_lora_a = w3_lora_a[local_expert_indices]
+                w1_lora_b = w1_lora_b[local_expert_indices]
+                w2_lora_b = w2_lora_b[local_expert_indices]
+                w3_lora_b = w3_lora_b[local_expert_indices]
         
         assert (
             local_num_experts
@@ -753,22 +752,21 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
         
-        # Check if LoRA weights need filtering for EP mode
-        # If LoRA weights already have local_num_experts, they were already filtered during packing
-        if (
-            self.base_layer.use_ep
-            and self.base_layer._expert_map is not None
-            and w13_lora_a.shape[0] != local_num_experts
-        ):
+        # Always filter LoRA weights for EP mode to ensure consistency
+        # between dummy weights (created during CUDA graph capture) and real weights
+        if self.base_layer.use_ep and self.base_layer._expert_map is not None:
             expert_map = self.base_layer._expert_map
             # Filter to only include experts that are local to this rank
             # expert_map[i] gives the local expert index for global expert i, or -1 if not local
             local_expert_indices = [i for i in range(expert_map.shape[0]) if expert_map[i] >= 0]
             
-            w13_lora_a = w13_lora_a[local_expert_indices]
-            w2_lora_a = w2_lora_a[local_expert_indices]
-            w13_lora_b = w13_lora_b[local_expert_indices]
-            w2_lora_b = w2_lora_b[local_expert_indices]
+            # Only filter if the weights contain more experts than local experts
+            # This handles both cases: unfiltered weights and already-filtered weights
+            if w13_lora_a.shape[0] > local_num_experts:
+                w13_lora_a = w13_lora_a[local_expert_indices]
+                w2_lora_a = w2_lora_a[local_expert_indices]
+                w13_lora_b = w13_lora_b[local_expert_indices]
+                w2_lora_b = w2_lora_b[local_expert_indices]
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
