@@ -127,25 +127,31 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        # Use EP-aware prepare/finalize when EP is enabled
-        if self.base_layer.use_ep:
-            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-                MoEPrepareAndFinalizeNaiveEP,
-            )
-            prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
-                is_sequence_parallel=self.base_layer.is_sequence_parallel,
-                num_dispatchers=1,
-            )
+        # Check if the quantization method already has a modular kernel
+        if hasattr(self.base_layer.quant_method, 'moe_mk') and self.base_layer.quant_method.moe_mk is not None:
+            # Use the pre-existing modular kernel
+            m_fused_moe_fn = self.base_layer.quant_method.moe_mk
         else:
-            prepare_finalize = MoEPrepareAndFinalizeNoEP()
-        
-        m_fused_moe_fn = FusedMoEModularKernel(
-            prepare_finalize,
-            self.base_layer.quant_method.select_gemm_impl(
-                prepare_finalize, self.base_layer
-            ),
-            self.base_layer.shared_experts,
-        )
+            # Use the old initialization logic for quantization methods that support it
+            # Use EP-aware prepare/finalize when EP is enabled
+            if self.base_layer.use_ep:
+                from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                    MoEPrepareAndFinalizeNaiveEP,
+                )
+                prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
+                    is_sequence_parallel=self.base_layer.is_sequence_parallel,
+                    num_dispatchers=1,
+                )
+            else:
+                prepare_finalize = MoEPrepareAndFinalizeNoEP()
+            
+            m_fused_moe_fn = FusedMoEModularKernel(
+                prepare_finalize,
+                self.base_layer.quant_method.select_gemm_impl(
+                    prepare_finalize, self.base_layer
+                ),
+                self.base_layer.shared_experts,
+            )
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
                 m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)
