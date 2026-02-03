@@ -46,9 +46,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
@@ -130,7 +127,18 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        # Use EP-aware prepare/finalize when EP is enabled
+        if self.base_layer.use_ep:
+            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                MoEPrepareAndFinalizeNaiveEP,
+            )
+            prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
+                is_sequence_parallel=self.base_layer.is_sequence_parallel,
+                num_dispatchers=1,
+            )
+        else:
+            prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        
         m_fused_moe_fn = FusedMoEModularKernel(
             prepare_finalize,
             self.base_layer.quant_method.select_gemm_impl(
@@ -167,6 +175,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 topk_weights = moe_state_dict["topk_weights"]
                 curr_topk_ids = moe_state_dict["topk_ids"]
 
+                # expert_map maps global expert IDs to local expert IDs
+                # In EP mode, this is used to determine which experts are local
+                # to this rank. The moe_lora_align_block_size function uses
+                # this map to ensure tokens are only assigned to local experts.
                 expert_map = moe_state_dict["expert_map"]
 
                 config_dtype = _get_config_dtype_str(
@@ -259,6 +271,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             def wrapper(*args, **kwargs):
                 hidden_states = moe_state_dict["hidden_states"]
                 topk_weights = moe_state_dict["topk_weights"]
+                
+                # In EP mode, the expert_ids_lora and sorted_token_ids_lora
+                # have already been filtered to only include local experts
+                # by the moe_lora_align_block_size call in act_decorator.
+                # This ensures LoRA operations only apply to experts on this rank.
 
                 config_dtype = _get_config_dtype_str(
                     dtype=hidden_states.dtype,
