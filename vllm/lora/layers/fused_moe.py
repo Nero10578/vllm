@@ -49,7 +49,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
-        # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
+        # For  non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         self._inject_lora_into_fused_moe()
