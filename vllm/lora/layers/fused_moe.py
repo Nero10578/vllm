@@ -554,8 +554,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
         
-        # In EP mode, filter LoRA weights to only include local experts
-        if self.base_layer.use_ep and self.base_layer._expert_map is not None:
+        # Check if LoRA weights need filtering for EP mode
+        # If LoRA weights already have local_num_experts, they were already filtered during packing
+        if (
+            self.base_layer.use_ep
+            and self.base_layer._expert_map is not None
+            and w1_lora_a.shape[0] != local_num_experts
+        ):
             expert_map = self.base_layer._expert_map
             # Filter to only include experts that are local to this rank
             # expert_map[i] gives the local expert index for global expert i, or -1 if not local
@@ -573,6 +578,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             == w1_lora_a.shape[0]
             == w2_lora_a.shape[0]
             == w3_lora_a.shape[0]
+        ), (
+            f"Expected {local_num_experts} local experts, but got "
+            f"w1_lora_a.shape[0]={w1_lora_a.shape[0]}, "
+            f"w2_lora_a.shape[0]={w2_lora_a.shape[0]}, "
+            f"w3_lora_a.shape[0]={w3_lora_a.shape[0]}"
         )
 
         slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
@@ -743,8 +753,13 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
         
-        # In EP mode, filter LoRA weights to only include local experts
-        if self.base_layer.use_ep and self.base_layer._expert_map is not None:
+        # Check if LoRA weights need filtering for EP mode
+        # If LoRA weights already have local_num_experts, they were already filtered during packing
+        if (
+            self.base_layer.use_ep
+            and self.base_layer._expert_map is not None
+            and w13_lora_a.shape[0] != local_num_experts
+        ):
             expert_map = self.base_layer._expert_map
             # Filter to only include experts that are local to this rank
             # expert_map[i] gives the local expert index for global expert i, or -1 if not local
