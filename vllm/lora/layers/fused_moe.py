@@ -549,12 +549,27 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.reset_lora(index)
         self.adapter_enabled[index] = 1
 
-        num_experts = self.w13_lora_a_stacked[0].shape[1]
+        local_num_experts = self.w13_lora_a_stacked[0].shape[1]
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+        
+        # In EP mode, filter LoRA weights to only include local experts
+        if self.base_layer.use_ep and self.base_layer._expert_map is not None:
+            expert_map = self.base_layer._expert_map
+            # Filter to only include experts that are local to this rank
+            # expert_map[i] gives the local expert index for global expert i, or -1 if not local
+            local_expert_indices = [i for i in range(expert_map.shape[0]) if expert_map[i] >= 0]
+            
+            w1_lora_a = w1_lora_a[local_expert_indices]
+            w2_lora_a = w2_lora_a[local_expert_indices]
+            w3_lora_a = w3_lora_a[local_expert_indices]
+            w1_lora_b = w1_lora_b[local_expert_indices]
+            w2_lora_b = w2_lora_b[local_expert_indices]
+            w3_lora_b = w3_lora_b[local_expert_indices]
+        
         assert (
-            num_experts
+            local_num_experts
             == w1_lora_a.shape[0]
             == w2_lora_a.shape[0]
             == w3_lora_a.shape[0]
@@ -727,6 +742,18 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
 
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
+        
+        # In EP mode, filter LoRA weights to only include local experts
+        if self.base_layer.use_ep and self.base_layer._expert_map is not None:
+            expert_map = self.base_layer._expert_map
+            # Filter to only include experts that are local to this rank
+            # expert_map[i] gives the local expert index for global expert i, or -1 if not local
+            local_expert_indices = [i for i in range(expert_map.shape[0]) if expert_map[i] >= 0]
+            
+            w13_lora_a = w13_lora_a[local_expert_indices]
+            w2_lora_a = w2_lora_a[local_expert_indices]
+            w13_lora_b = w13_lora_b[local_expert_indices]
+            w2_lora_b = w2_lora_b[local_expert_indices]
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
