@@ -514,21 +514,9 @@ class LoRAModelManager:
                 if hasattr(module, "base_layer") and hasattr(module.base_layer, "expert_map"):
                     expert_map = module.base_layer.expert_map
                 
-                # Determine which experts to create dummy weights for
-                # In EP mode, only create dummy weights for local experts to match
-                # the memory layout that will be used during inference
-                num_experts_per_replacement = len(replacements)
-                if expert_map is not None:
-                    # In EP mode, only create dummy weights for local experts
-                    local_expert_indices = [i for i in range(expert_map.shape[0]) if expert_map[i] >= 0]
-                    num_local_experts = len(local_expert_indices)
-                else:
-                    # In non-EP mode, create dummy weights for all experts
-                    local_expert_indices = list(range(num_experts_per_replacement))
-                    num_local_experts = num_experts_per_replacement
-                
-                # Create dummy weights only for local experts
-                for local_expert_idx in local_expert_indices:
+                # Create dummy weights for all experts first
+                num_experts = module.w13_lora_a_stacked[0].shape[1] if hasattr(module, "w13_lora_a_stacked") else 1
+                for expert_idx in range(num_experts):
                     for i, r in enumerate(replacements):
                         lora = LoRALayerWeights.create_dummy_lora_weights(
                             module_name + "." + r,
@@ -545,10 +533,10 @@ class LoRAModelManager:
                     # to match pack_moe expectations (w1, w2, None for w3)
                     if self._is_non_gated_moe and len(subloras) > 0:
                         subloras = self._pad_lora_pairs_to_triplets(subloras)
-                    # Pack without expert_map since we already filtered to local experts
+                    # Pack with expert_map to filter to local experts
                     lora = PackedLoRALayerWeights.pack_moe(
                         subloras, module_name, is_non_gated_moe=self._is_non_gated_moe,
-                        expert_map=None  # Already filtered to local experts
+                        expert_map=expert_map
                     )
                 else:
                     lora = PackedLoRALayerWeights.pack(subloras)
