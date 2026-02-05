@@ -113,11 +113,16 @@ def maybe_make_prepare_finalize(
                     "Detected DP deployment with no --enable-expert-parallel. "
                     "Falling back to AllGather+ReduceScatter dispatch/combine."
                 )
+            # Use EP size for num_dispatchers when all2all_manager is not available
+            num_dispatchers = moe.moe_parallel_config.ep_size
+            if num_dispatchers == 1:
+                # Fallback to all2all_manager if available (for DP case)
+                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                if all2all_manager is not None:
+                    num_dispatchers = all2all_manager.world_size
             return MoEPrepareAndFinalizeNaiveEP(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
-                num_dispatchers=(
-                    get_ep_group().device_communicator.all2all_manager.world_size
-                ),
+                num_dispatchers=num_dispatchers,
             )
         else:
             return MoEPrepareAndFinalizeNoEP()
