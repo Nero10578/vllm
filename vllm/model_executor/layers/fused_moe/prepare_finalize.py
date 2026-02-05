@@ -103,6 +103,19 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
                     a1q_scale = a1q_scale.view(torch.uint8)
                 a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
+        # Map global expert IDs to local expert IDs for LoRA compatibility
+        # This is needed for CUDA graph capture compatibility, as dynamic
+        # indexing in the LoRA kernel breaks graph capture
+        if expert_map is not None:
+            # Create a mask for valid expert IDs (>= 0 and < expert_map.shape[0])
+            valid_mask = (topk_ids >= 0) & (topk_ids < expert_map.shape[0])
+            # Map valid expert IDs to local IDs, keep invalid IDs as-is
+            topk_ids = torch.where(
+                valid_mask,
+                expert_map[topk_ids.clamp(min=0, max=expert_map.shape[0] - 1)],
+                topk_ids
+            )
+
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
     def finalize(

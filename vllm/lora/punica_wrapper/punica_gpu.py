@@ -381,16 +381,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                 adapter_enabled,
                 lora_ids,
             )
-            if expert_map is not None:
-                # Map global expert IDs to local expert IDs
-                # Only map valid expert IDs (>= 0 and < expert_map.shape[0]), leave -1 as is
-                valid_mask = (expert_ids >= 0) & (expert_ids < expert_map.shape[0])
-                # For valid indices, map to local expert ID; for invalid, keep original value
-                expert_ids = torch.where(
-                    valid_mask,
-                    expert_map[expert_ids.clamp(min=0, max=expert_map.shape[0] - 1)],
-                    expert_ids
-                )
+            # Note: In EP mode, expert IDs are already mapped to local IDs in the
+            # MoEPrepareAndFinalizeNaiveEP.prepare() method for CUDA graph capture
+            # compatibility. Therefore, we skip the mapping here to avoid double-mapping.
+            # The expert_map parameter is kept for backward compatibility but is not used.
 
         return None, sorted_ids, expert_ids, num_tokens_post_pad
 
