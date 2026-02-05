@@ -101,11 +101,18 @@ def maybe_make_prepare_finalize(
             return None
 
         # For DP/TP case, fall back to naive P/F.
-        if moe.moe_parallel_config.dp_size > 1:
-            logger.info_once(
-                "Detected DP deployment with no --enable-expert-parallel. "
-                "Falling back to AllGather+ReduceScatter dispatch/combine."
-            )
+        # For EP case, also use naive P/F (EP can work without all2all kernels)
+        if moe.moe_parallel_config.dp_size > 1 or moe.moe_parallel_config.ep_size > 1:
+            if moe.moe_parallel_config.ep_size > 1:
+                logger.info_once(
+                    "Detected EP deployment with no all2all kernels. "
+                    "Using naive EP dispatch/combine."
+                )
+            else:
+                logger.info_once(
+                    "Detected DP deployment with no --enable-expert-parallel. "
+                    "Falling back to AllGather+ReduceScatter dispatch/combine."
+                )
             return MoEPrepareAndFinalizeNaiveEP(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
                 num_dispatchers=(
