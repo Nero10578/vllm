@@ -9,68 +9,34 @@ from transformers import PreTrainedTokenizerBase
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("glm45")
-class Glm4MoeModelReasoningParser(ReasoningParser):
+class IdentityReasoningParser(ReasoningParser):
     """
-    Reasoning parser for the Glm4MoeModel model.
+    Identity reasoning parser.
 
-    The Glm4MoeModel model uses <think>...</think> tokens to denote reasoning
-    text within its output. The model provides a strict switch to disable
-    reasoning output via the 'enable_thinking=False' parameter. This parser
-    extracts the reasoning content enclosed by <think> and </think> tokens
-    from the model's output.
+    This parser does not attempt to parse or strip out reasoning tokens.
+    It treats the entire model output as content and ignores reasoning.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
-        self.think_start_token = "<think>"
-        self.think_end_token = "</think>"
-        self.assistant_token = "<|assistant|>"
-
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ReasoningParser "
                 "constructor during construction."
             )
 
-        self.think_start_token_id = self.vocab.get(self.think_start_token)
-        self.think_end_token_id = self.vocab.get(self.think_end_token)
-        self.assistant_token_id = self.vocab.get(self.assistant_token)
-        if (
-            self.think_start_token_id is None
-            or self.think_end_token_id is None
-            or self.assistant_token_id is None
-        ):
-            raise RuntimeError(
-                "Glm4MoeModel reasoning parser could not locate "
-                "think start/end or assistant tokens in the tokenizer!"
-            )
-
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        """
-        GLM's chat template has <think></think> tokens after every
-        <|assistant|> token. Thus, we need to check if </think> is
-        after the most recent <|assistant|> token (if present).
-        """
-        for token_id in input_ids[::-1]:
-            if token_id == self.think_end_token_id:
-                return True
-            elif token_id == self.assistant_token_id:
-                return False
-        return False
+        # Always return True, since we never treat reasoning specially
+        return True
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        """
-        Extract the content after the end tokens
-        """
-        if self.think_end_token_id not in input_ids[:-1]:
-            return []
-        else:
-            return input_ids[input_ids.index(self.think_end_token_id) + 1 :]
+        # Identity: return all tokens as content
+        return input_ids
 
     def extract_reasoning_content_streaming(
         self,
@@ -81,93 +47,73 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> Union[DeltaMessage, None]:
-        """
-        Extract reasoning content from a delta message.
-        Handles streaming output where previous + delta = current.
-        Uses token IDs for faster processing.
-        For text <think>abc</think>xyz:
-        - 'abc' goes to reasoning_content
-        - 'xyz' goes to content
-        """
-        # Skip single special tokens
-        if len(delta_token_ids) == 1 and (
-            delta_token_ids[0] in [self.think_start_token_id, self.think_end_token_id]
-        ):
-            return None
-
-        if self.think_start_token_id in previous_token_ids:
-            if self.think_end_token_id in delta_token_ids:
-                # <think> in previous, </think> in delta,
-                # extract reasoning content
-                end_index = delta_text.find(self.think_end_token)
-                reasoning_content = delta_text[:end_index]
-                content = delta_text[end_index + len(self.think_end_token) :]
-                return DeltaMessage(
-                    reasoning_content=reasoning_content,
-                    content=content if content else None,
-                )
-            elif self.think_end_token_id in previous_token_ids:
-                # <think> in previous, </think> in previous,
-                # reasoning content continues
-                return DeltaMessage(content=delta_text)
-            else:
-                # <think> in previous, no </think> in previous or delta,
-                # reasoning content continues
-                return DeltaMessage(reasoning_content=delta_text)
-        elif self.think_start_token_id in delta_token_ids:
-            if self.think_end_token_id in delta_token_ids:
-                # <think> in delta, </think> in delta, extract reasoning content
-                start_index = delta_text.find(self.think_start_token)
-                end_index = delta_text.find(self.think_end_token)
-                reasoning_content = delta_text[
-                    start_index + len(self.think_start_token) : end_index
-                ]
-                content = delta_text[end_index + len(self.think_end_token) :]
-                return DeltaMessage(
-                    reasoning_content=reasoning_content,
-                    content=content if content else None,
-                )
-            else:
-                # <think> in delta, no </think> in delta,
-                # reasoning content continues
-                return DeltaMessage(reasoning_content=delta_text)
-        else:
-            # thinking is disabled, just content
+        # Just wrap delta_text as content, ignore reasoning
+        if delta_text:
             return DeltaMessage(content=delta_text)
+        return None
 
     def extract_reasoning_content(
         self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
-        """
-        Extract reasoning content from the model output.
+        # No reasoning separation: return None for reasoning,
+        # and full model_output as content
+        return None, model_output
 
-        For text <think>abc</think>xyz:
-        - 'abc' goes to reasoning_content
-        - 'xyz' goes to content
 
-        Returns:
-            tuple[Optional[str], Optional[str]]: reasoning content and content
-        """
+@ReasoningParserManager.register_module("glm45")
+class Glm4MoeModelReasoningParser(ReasoningParser):
+    """
+    Reasoning parser for the Glm4MoeModel model.
+    
+    Delegates to either DeepSeekR1ReasoningParser or IdentityReasoningParser
+    based on `thinking` and `enable_thinking`.
+    """
 
-        # Check if the model output contains the <think> and </think> tokens.
-        if (
-            self.think_start_token not in model_output
-            or self.think_end_token not in model_output
-        ):
-            return None, model_output
-        # Check if the <think> is present in the model output, remove it
-        # if it is present.
-        model_output_parts = model_output.partition(self.think_start_token)
-        model_output = (
-            model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        thinking = chat_kwargs.get("thinking", None)
+        enable_thinking = chat_kwargs.get("enable_thinking", None)
+        if thinking is None and enable_thinking is None:
+            chat_kwargs["thinking"] = True
+            chat_kwargs["enable_thinking"] = True
+            kwargs["chat_template_kwargs"] = chat_kwargs
+            
+        super().__init__(tokenizer, *args, **kwargs)
+
+        thinking = bool(chat_kwargs.get("thinking", False))
+        enable_thinking = bool(chat_kwargs.get("enable_thinking", False))
+        thinking = thinking or enable_thinking
+
+        if thinking:
+            self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
+        else:
+            self._parser = IdentityReasoningParser(tokenizer, *args, **kwargs)
+
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+        return self._parser.is_reasoning_end(input_ids)
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        return self._parser.extract_content_ids(input_ids)
+
+    def extract_reasoning_content(
+        self, model_output: str, request: ChatCompletionRequest
+    ) -> tuple[Optional[str], Optional[str]]:
+        return self._parser.extract_reasoning_content(model_output, request)
+
+    def extract_reasoning_content_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+    ) -> Union[DeltaMessage, None]:
+        return self._parser.extract_reasoning_content_streaming(
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
         )
-        # Check if the model output contains the </think> tokens.
-        # If the end token is not found, return the model output as is.
-        if self.think_end_token not in model_output:
-            return None, model_output
-
-        # Extract reasoning content from the model output.
-        reasoning_content, _, content = model_output.partition(self.think_end_token)
-
-        final_content = content or None
-        return reasoning_content, final_content
