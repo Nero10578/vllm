@@ -24,7 +24,7 @@ class Glm47MoeModelToolParser(Glm4MoeModelToolParser):
     the slightly different tool call format used by GLM 4.7.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
+    def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
         self.func_detail_regex = re.compile(
             r"<tool_call>(.*?)(<arg_key>.*?)?</tool_call>", re.DOTALL
