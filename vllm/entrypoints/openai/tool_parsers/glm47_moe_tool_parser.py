@@ -5,6 +5,9 @@ import regex as re
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    ToolParserManager,
+)
 from vllm.entrypoints.openai.tool_parsers.glm4_moe_tool_parser import (
     Glm4MoeModelToolParser,
 )
