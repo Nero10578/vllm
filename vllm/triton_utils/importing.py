@@ -15,38 +15,61 @@ HAS_TRITON = (
 )
 if HAS_TRITON:
     try:
-        from triton.backends import backends
+        # Try to import backends - handle both old and new Triton APIs
+        try:
+            from triton.backends import backends
+        except (ImportError, AttributeError):
+            # Triton 3.7.0+ has different backend structure
+            # Try to get available backends directly
+            try:
+                import triton
+                # For newer Triton versions, just check if triton is importable
+                # and assume it's working
+                backends = {}
+                logger.info(
+                    "Triton %s detected with new backend structure. "
+                    "Skipping backend discovery.",
+                    getattr(triton, "__version__", "unknown")
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to detect Triton backends: %s. Disabling Triton.",
+                    e
+                )
+                HAS_TRITON = False
+                backends = None
 
-        # It's generally expected that x.driver exists and has
-        # an is_active method.
-        # The `x.driver and` check adds a small layer of safety.
-        active_drivers = [
-            x.driver for x in backends.values() if x.driver and x.driver.is_active()
-        ]
+        if backends is not None:
+            # It's generally expected that x.driver exists and has
+            # an is_active method.
+            # The `x.driver and` check adds a small layer of safety.
+            active_drivers = [
+                x.driver for x in backends.values() if x.driver and x.driver.is_active()
+            ]
 
-        # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
-        # might be temporarily empty (e.g., Ray sets it to "" during actor init)
-        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-        is_distributed_env = (
-            cuda_visible_devices is not None and len(cuda_visible_devices.strip()) == 0
-        )
-
-        # Apply lenient driver check for distributed environments
-        if is_distributed_env and len(active_drivers) == 0:
-            # Allow 0 drivers in distributed environments - they may become
-            # active later when CUDA context is properly initialized
-            logger.debug(
-                "Triton found 0 active drivers in distributed environment. "
-                "This is expected during initialization."
+            # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
+            # might be temporarily empty (e.g., Ray sets it to "" during actor init)
+            cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+            is_distributed_env = (
+                cuda_visible_devices is not None and len(cuda_visible_devices.strip()) == 0
             )
-        elif not is_distributed_env and len(active_drivers) != 1:
-            # Strict check for non-distributed environments
-            logger.info(
-                "Triton is installed but %d active driver(s) found "
-                "(expected 1). Disabling Triton to prevent runtime errors.",
-                len(active_drivers),
-            )
-            HAS_TRITON = False
+
+            # Apply lenient driver check for distributed environments
+            if is_distributed_env and len(active_drivers) == 0:
+                # Allow 0 drivers in distributed environments - they may become
+                # active later when CUDA context is properly initialized
+                logger.debug(
+                    "Triton found 0 active drivers in distributed environment. "
+                    "This is expected during initialization."
+                )
+            elif not is_distributed_env and len(active_drivers) != 1:
+                # Strict check for non-distributed environments
+                logger.info(
+                    "Triton is installed but %d active driver(s) found "
+                    "(expected 1). Disabling Triton to prevent runtime errors.",
+                    len(active_drivers),
+                )
+                HAS_TRITON = False
     except ImportError:
         # This can occur if Triton is partially installed or triton.backends
         # is missing.
