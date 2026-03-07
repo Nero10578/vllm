@@ -105,13 +105,10 @@ def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
                     break
 
         if tensor is not None:
-            # Use the appropriate device context manager based on the platform
-            if is_intel:
+            if current_platform.is_xpu():
                 ctx = torch.xpu.device(tensor.device.index)
-            elif is_nvidia or is_amd:
-                ctx = torch.cuda.device(tensor.device.index)
             else:
-                ctx = contextlib.nullcontext()
+                ctx = torch.cuda.device(tensor.device.index)
         else:
             ctx = contextlib.nullcontext()
 
