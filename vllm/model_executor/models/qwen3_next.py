@@ -719,6 +719,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,
                 num_actual_tokens=attn_metadata.num_actual_tokens,
                 tp_size=self.tp_size,
+                reorder_input=False,
             )
 
         # ============================================================
