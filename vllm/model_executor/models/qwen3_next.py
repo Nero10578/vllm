@@ -651,6 +651,67 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             self.forward_cuda(hidden_states, output)
 
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        """
+        Forward pass with three parts:
+        1. Input projection
+        2. Core attention (custom op)
+        3. Output projection
+        """
+        num_tokens = hidden_states.size(0)
+
+        # ============================================================
+        # Part 1: Input Projection
+        # ============================================================
+        projected_states_qkvz, projected_states_ba = torch.ops.vllm.gdn_in_proj(
+            hidden_states,
+            self.in_proj_qkvz.weight.shape[0],
+            self.in_proj_ba.weight.shape[0],
+            self.prefix,
+        )
+        query, key, value, z, b, a = self.fix_query_key_value_ordering(
+            projected_states_qkvz, projected_states_ba
+        )
+        query, key, value = map(
+            lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+        )
+        mixed_qkv = torch.cat((query, key, value), dim=-1)
+
+        # ============================================================
+        # Part 2: Core Attention (Custom Op)
+        # ============================================================
+        # Note: we should not use torch.empty here like other attention backends,
+        # see discussions in https://github.com/vllm-project/vllm/pull/28182
+        core_attn_out = torch.zeros(
+            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        torch.ops.vllm.gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.prefix,
+        )
+
+        # ============================================================
+        # Part 3: Output Projection
+        # ============================================================
+        z_shape_og = z.shape
+        # Reshape input data into 2D tensor
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
+
     def forward_xpu(
         self,
         hidden_states: torch.Tensor,
@@ -721,67 +782,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 tp_size=self.tp_size,
                 reorder_input=False,
             )
-
-        # ============================================================
-        # Part 3: Output Projection
-        # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
-
-    def forward_cuda(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
-        """
-        Forward pass with three parts:
-        1. Input projection
-        2. Core attention (custom op)
-        3. Output projection
-        """
-        num_tokens = hidden_states.size(0)
-
-        # ============================================================
-        # Part 1: Input Projection
-        # ============================================================
-        projected_states_qkvz, projected_states_ba = torch.ops.vllm.gdn_in_proj(
-            hidden_states,
-            self.in_proj_qkvz.weight.shape[0],
-            self.in_proj_ba.weight.shape[0],
-            self.prefix,
-        )
-        query, key, value, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba
-        )
-        query, key, value = map(
-            lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-        )
-        mixed_qkv = torch.cat((query, key, value), dim=-1)
-
-        # ============================================================
-        # Part 2: Core Attention (Custom Op)
-        # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-
-        torch.ops.vllm.gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            self.prefix,
-        )
 
         # ============================================================
         # Part 3: Output Projection
