@@ -1960,8 +1960,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for k, v in intermediate_tensors.items():
                 is_scattered = k == "residual" and is_rs
                 copy_len = num_tokens // tp if is_scattered else num_tokens
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True
+                actual_copy_len = min(copy_len, v.shape[0])
+                self.intermediate_tensors[k][:actual_copy_len].copy_(
+                    v[:actual_copy_len], non_blocking=True
                 )
 
         return IntermediateTensors(
