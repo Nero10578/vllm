@@ -1001,6 +1001,22 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        # Unpad hidden_states if it was padded for EP LoRA routing
+        expected_k = w1.size(2) * 2 if self.quant_config.use_int4_w4a16 else w1.size(2)
+        if hidden_states.size(-1) > expected_k:
+            self.token_lora_indices = hidden_states[:, :, expected_k].to(torch.long).flatten()
+            hidden_states = hidden_states[:, :, :expected_k]
+            self.unpadded_hidden_states = hidden_states
+            self.topk_ids = topk_ids
+            self.topk_weights = topk_weights
+            self.expert_map = expert_map
+        else:
+            self.unpadded_hidden_states = hidden_states
+            self.token_lora_indices = None
+            self.topk_ids = topk_ids
+            self.topk_weights = topk_weights
+            self.expert_map = expert_map
+            
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"

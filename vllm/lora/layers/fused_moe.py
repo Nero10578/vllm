@@ -4,6 +4,7 @@ import functools
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm import envs
@@ -46,9 +47,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         super().__init__()
         self.base_layer = base_layer
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
@@ -178,11 +176,32 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             def wrapper(*args, **kwargs):
                 _, output, input = args
 
-                hidden_states = moe_state_dict["hidden_states"]
-                topk_weights = moe_state_dict["topk_weights"]
-                curr_topk_ids = moe_state_dict["topk_ids"]
+                # Use post-dispatch tensors if available (for EP)
+                if hasattr(m_fused_moe_fn.fused_experts, "unpadded_hidden_states"):
+                    hidden_states = m_fused_moe_fn.fused_experts.unpadded_hidden_states
+                    topk_weights = m_fused_moe_fn.fused_experts.topk_weights
+                    curr_topk_ids = m_fused_moe_fn.fused_experts.topk_ids
+                    expert_map = m_fused_moe_fn.fused_experts.expert_map
+                    token_lora_indices = m_fused_moe_fn.fused_experts.token_lora_indices
+                else:
+                    hidden_states = moe_state_dict["hidden_states"]
+                    topk_weights = moe_state_dict["topk_weights"]
+                    curr_topk_ids = moe_state_dict["topk_ids"]
+                    expert_map = moe_state_dict["expert_map"]
+                    token_lora_indices = None
 
-                expert_map = moe_state_dict["expert_map"]
+                if token_lora_indices is None:
+                    token_lora_indices = self.punica_wrapper.token_lora_indices
+
+                # Temporarily override punica_wrapper's token_lora_indices
+                orig_token_lora_indices = self.punica_wrapper._token_lora_indices
+                orig_indices_len = self.punica_wrapper.indices_len[0]
+                
+                # We need to pad token_lora_indices to max_num_batched_tokens if necessary,
+                # but moe_lora_align_block_size only reads up to num_tokens.
+                # So we can just set it directly.
+                self.punica_wrapper._token_lora_indices = token_lora_indices
+                self.punica_wrapper.indices_len[0] = token_lora_indices.size(0)
 
                 config_dtype = _get_config_dtype_str(
                     dtype=hidden_states.dtype,
@@ -230,6 +249,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     naive_block_assignment=naive_block_assignment,
                 )
 
+                # Restore punica_wrapper's token_lora_indices
+                self.punica_wrapper._token_lora_indices = orig_token_lora_indices
+                self.punica_wrapper.indices_len[0] = orig_indices_len
+
                 moe_state_dict["sorted_token_ids_lora"] = sorted_token_ids_lora
                 moe_state_dict["expert_ids_lora"] = expert_ids_lora
                 moe_state_dict["num_tokens_post_padded_lora"] = (
@@ -271,8 +294,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         def moe_sum_decorator(layer, func):
             def wrapper(*args, **kwargs):
-                hidden_states = moe_state_dict["hidden_states"]
-                topk_weights = moe_state_dict["topk_weights"]
+                if hasattr(m_fused_moe_fn.fused_experts, "unpadded_hidden_states"):
+                    hidden_states = m_fused_moe_fn.fused_experts.unpadded_hidden_states
+                    topk_weights = m_fused_moe_fn.fused_experts.topk_weights
+                else:
+                    hidden_states = moe_state_dict["hidden_states"]
+                    topk_weights = moe_state_dict["topk_weights"]
 
                 config_dtype = _get_config_dtype_str(
                     dtype=hidden_states.dtype,
@@ -587,6 +614,28 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         ].copy_(sliced_w2_lora_b, non_blocking=True)
 
     def forward(self, *args, **kwargs):
+        if self.base_layer.use_ep:
+            hidden_states = kwargs.get("hidden_states", args[0] if len(args) > 0 else None)
+            token_lora_indices = self.punica_wrapper.token_lora_indices
+            # Pad hidden_states to pass token_lora_indices through EP routing
+            # We pad by 256 elements (512 bytes for bfloat16/float16) to satisfy DeepEP alignment
+            # Ensure token_lora_indices matches hidden_states size
+            if token_lora_indices.size(0) > hidden_states.size(0):
+                token_lora_indices = token_lora_indices[:hidden_states.size(0)]
+            elif token_lora_indices.size(0) < hidden_states.size(0):
+                # Pad token_lora_indices if it's smaller (shouldn't happen normally)
+                token_lora_indices = F.pad(token_lora_indices, (0, hidden_states.size(0) - token_lora_indices.size(0)), value=-1)
+                
+            padded_hidden_states = torch.cat([
+                hidden_states,
+                token_lora_indices.unsqueeze(-1).to(hidden_states.dtype),
+                torch.zeros(hidden_states.size(0), 255, dtype=hidden_states.dtype, device=hidden_states.device)
+            ], dim=-1)
+            if "hidden_states" in kwargs:
+                kwargs["hidden_states"] = padded_hidden_states
+            else:
+                args = (padded_hidden_states,) + args[1:]
+
         return self.base_layer.forward(*args, **kwargs)
 
     def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
