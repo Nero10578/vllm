@@ -268,7 +268,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 #
 
                 self.punica_wrapper.add_lora_fused_moe(
-                    input.view(-1, top_k, input.shape[-1]),
+                    input.view(-1, top_k, input.size(-1)),
                     hidden_states,
                     self.w13_lora_a_stacked,
                     self.w13_lora_b_stacked,

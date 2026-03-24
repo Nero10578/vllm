@@ -450,11 +450,11 @@ class DefaultMoERunner(MoERunner):
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, list[int]]:
         original_hidden_dim = (
-            original_hidden_states.shape[-1]
+            original_hidden_states.size(-1)
             if original_hidden_states is not None
             else 0
         )
-        transformed_hidden_dim = hidden_states.shape[-1]
+        transformed_hidden_dim = hidden_states.size(-1)
         if (
             not self.quant_method.skip_forward_padding
             and self.moe_config.hidden_dim > transformed_hidden_dim
@@ -784,7 +784,7 @@ class DefaultMoERunner(MoERunner):
             and not self.use_dp_chunking
             and self.shared_experts_stream is not None
             and (
-                hidden_states.shape[0]
+                hidden_states.size(0)
                 <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
             )
         )

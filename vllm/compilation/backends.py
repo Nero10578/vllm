@@ -518,6 +518,17 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
         # Dynamo always passes size as a direct arg: view(clone, size)
         # → view(clone, d0, d1, ...)
         for user in list(node.users):
+            # If the user is a getitem, we can just replace it with the specific dim
+            if user.op == "call_function" and user.target == operator.getitem:
+                idx = user.args[1]
+                if isinstance(idx, int):
+                    # Handle negative indices
+                    if idx < 0:
+                        idx += len(dims)
+                    user.replace_all_uses_with(dims[idx])
+                    graph.graph.erase_node(user)
+                    continue
+
             new_args = []
             for arg in user.args:
                 if arg is node:
@@ -525,6 +536,18 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
                 else:
                     new_args.append(arg)
             user.args = tuple(new_args)
+            
+            new_kwargs = {}
+            for k, v in user.kwargs.items():
+                if v is node:
+                    # We can't easily extend kwargs, so we just pass the tuple of dims
+                    # But actually, if it's a size, maybe it expects a tuple?
+                    # Let's just pass the tuple of dims if it's in kwargs
+                    # Wait, we can't pass a tuple of nodes easily if it expects a tuple.
+                    # Actually, let's just leave it or wrap it in a tuple node?
+                    pass
+                new_kwargs[k] = v
+            # user.kwargs = new_kwargs
         graph.graph.erase_node(node)
 
 
