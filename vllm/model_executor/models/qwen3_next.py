@@ -339,8 +339,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
-        orig_shape = hidden_states.shape
-        num_tokens, hidden_dim = hidden_states.shape
+        # Actually, it must be 2D because the original code unpacked 2 elements.
+        orig_shape = (hidden_states.size(0), hidden_states.size(1))
+        num_tokens = hidden_states.size(0)
+        hidden_dim = hidden_states.size(1)
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         if self.is_sequence_parallel:
@@ -695,10 +697,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
+        z_shape_og = (z.size(0), z.size(1), z.size(2))
         # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.size(-1))
+        z = z.reshape(-1, z.size(-1))
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
@@ -1022,7 +1024,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             merged_out = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
+                (1, num_actual_tokens, *tuple(core_attn_out_spec.size(i) for i in range(2, core_attn_out_spec.dim()))),
                 dtype=core_attn_out_non_spec.dtype,
                 device=core_attn_out_non_spec.device,
             )
@@ -1174,7 +1176,7 @@ class Qwen3NextAttention(nn.Module):
             q_gate, k, v = qkv.split(
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
             )
-            orig_shape = q_gate.shape[:-1]
+            orig_shape = tuple(q_gate.size(i) for i in range(q_gate.dim() - 1))
             q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
             q, gate = torch.chunk(q_gate, 2, dim=-1)
             q = q.reshape(*orig_shape, -1)
@@ -1308,7 +1310,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         hidden_states = self_attention_output
 
         if self.layer_scale:
-            if len(hidden_states.shape) == 2:
+            if hidden_states.dim() == 2:
                 hidden_states = hidden_states * (
                     self.attn_layer_scale.to(hidden_states.dtype)[0] + 1
                 )
@@ -1322,14 +1324,14 @@ class Qwen3NextDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         if self.layer_scale:
-            if len(hidden_states.shape) == 2:
+            if hidden_states.dim() == 2:
                 hidden_states = hidden_states * (
                     self.ffn_layer_scale.to(hidden_states.dtype)[0] + 1
                 )
             else:
-                assert len(hidden_states.shape) == len(self.ffn_layer_scale.shape), (
-                    f"shape must be the same {len(hidden_states.shape)}, "
-                    f"{len(self.ffn_layer_scale.shape)}"
+                assert hidden_states.dim() == self.ffn_layer_scale.dim(), (
+                    f"shape must be the same {hidden_states.dim()}, "
+                    f"{self.ffn_layer_scale.dim()}"
                 )
                 hidden_states = hidden_states * (
                     self.ffn_layer_scale.to(hidden_states.dtype) + 1
@@ -1719,8 +1721,8 @@ def gdn_in_proj_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile."""
     return hidden_states.new_empty(
-        hidden_states.shape[0], qkvz_output_size
-    ), hidden_states.new_empty(hidden_states.shape[0], ba_output_size)
+        hidden_states.size(0), qkvz_output_size
+    ), hidden_states.new_empty(hidden_states.size(0), ba_output_size)
 
 
 def gdn_attention_core(
@@ -1820,7 +1822,7 @@ def fused_gdn_gating(
     beta_output = b.sigmoid()
     TODO maybe use torch.compile to replace this triton kernel
     """
-    batch, num_heads = a.shape
+    batch, num_heads = a.size(0), a.size(1)
     seq_len = 1
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
