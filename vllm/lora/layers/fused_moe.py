@@ -571,6 +571,29 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+
+        expert_map = getattr(self.base_layer, "expert_map", None)
+        if expert_map is not None:
+            global_indices = torch.where(expert_map != -1)[0]
+            local_indices = expert_map[global_indices].long()
+
+            valid_mask = local_indices < num_experts
+            global_indices = global_indices[valid_mask]
+            local_indices = local_indices[valid_mask]
+
+            def filter_experts(w):
+                if w is None: return None
+                new_w = torch.zeros((num_experts,) + w.shape[1:], dtype=w.dtype, device=w.device)
+                new_w[local_indices] = w[global_indices]
+                return new_w
+
+            w1_lora_a = filter_experts(w1_lora_a)
+            w2_lora_a = filter_experts(w2_lora_a)
+            w3_lora_a = filter_experts(w3_lora_a)
+            w1_lora_b = filter_experts(w1_lora_b)
+            w2_lora_b = filter_experts(w2_lora_b)
+            w3_lora_b = filter_experts(w3_lora_b)
+
         assert (
             num_experts
             == w1_lora_a.shape[0]
@@ -767,6 +790,27 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
 
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b
+
+        expert_map = getattr(self.base_layer, "expert_map", None)
+        if expert_map is not None:
+            global_indices = torch.where(expert_map != -1)[0]
+            local_indices = expert_map[global_indices].long()
+            num_experts = self.w13_lora_a_stacked[0].shape[1]
+
+            valid_mask = local_indices < num_experts
+            global_indices = global_indices[valid_mask]
+            local_indices = local_indices[valid_mask]
+
+            def filter_experts(w):
+                if w is None: return None
+                new_w = torch.zeros((num_experts,) + w.shape[1:], dtype=w.dtype, device=w.device)
+                new_w[local_indices] = w[global_indices]
+                return new_w
+
+            w13_lora_a = filter_experts(w13_lora_a)
+            w2_lora_a = filter_experts(w2_lora_a)
+            w13_lora_b = filter_experts(w13_lora_b)
+            w2_lora_b = filter_experts(w2_lora_b)
 
         sliced_w13_lora_a = self._slice_w13_a(w13_lora_a)
         sliced_w13_lora_b = self._slice_w13_b(w13_lora_b)
