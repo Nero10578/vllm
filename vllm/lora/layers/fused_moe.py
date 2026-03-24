@@ -659,7 +659,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             else:
                 args = (padded_hidden_states,) + args[1:]
 
-        return self.base_layer.forward(*args, **kwargs)
+        output = self.base_layer.forward(*args, **kwargs)
+
+        if self.base_layer.use_ep:
+            if isinstance(output, tuple):
+                output = tuple(out[..., :-256] for out in output)
+            else:
+                output = output[..., :-256]
+
+        return output
 
     def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
         return self.base_layer.maybe_all_reduce_tensor_model_parallel(*args, **kwargs)
