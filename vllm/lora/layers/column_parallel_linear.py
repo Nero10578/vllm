@@ -235,45 +235,47 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             for output_size in self.output_slices
         )
 
-    def slice_lora_a(
-        self, lora_a: list[torch.Tensor | None]
-    ) -> list[torch.Tensor | None]:
+    def slice_lora_a(self, lora_a: list[torch.Tensor | None] | torch.Tensor) -> list[torch.Tensor | None]:
+        if isinstance(lora_a, torch.Tensor):
+            lora_a = [lora_a] * self.n_slices
         return lora_a
 
-    def slice_lora_b(
-        self, lora_b: list[torch.Tensor | None]
-    ) -> list[torch.Tensor | None]:
+    def slice_lora_b(self, lora_b: list[torch.Tensor | None] | torch.Tensor) -> list[torch.Tensor | None]:
         sliced_lora_b = [None] * self.n_slices
-        for i, (shard_id, shard_size) in enumerate(
-            zip(self.output_ids, self.output_slices)
-        ):
-            if (lora_b_i := lora_b[i]) is not None:
-                sliced_lora_b[i] = lora_b_i[
-                    shard_size * shard_id : shard_size * (shard_id + 1), :
-                ]
+        if isinstance(lora_b, torch.Tensor):
+            lora_b = [lora_b] * self.n_slices
+        for i, (shard_id, shard_size) in enumerate(zip(self.output_ids, self.output_slices)):
+            if i < len(lora_b) and (lora_b_i := lora_b[i]) is not None:
+                sliced_lora_b[i] = lora_b_i[shard_size * shard_id : shard_size * (shard_id + 1), :]
         return sliced_lora_b
 
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor | list[torch.Tensor],
-        lora_b: torch.Tensor | list[torch.Tensor],
+        lora_a: torch.Tensor | list[torch.Tensor | None],
+        lora_b: torch.Tensor | list[torch.Tensor | None],
+        embeddings_tensor: torch.Tensor | None,
     ):
         self.reset_lora(index)
+
+        if isinstance(lora_a, torch.Tensor):
+            lora_a = [lora_a] * self.n_slices
+        if isinstance(lora_b, torch.Tensor):
+            lora_b = [lora_b] * self.n_slices
 
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
 
         for i in range(self.n_slices):
-            if (lora_a_i := lora_a[i]) is not None:
-                self.lora_a_stacked[i][
-                    index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]
-                ].copy_(lora_a_i, non_blocking=True)
-            if (lora_b_i := lora_b[i]) is not None:
-                self.lora_b_stacked[i][
-                    index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
-                ].copy_(lora_b_i, non_blocking=True)
+            if i < len(lora_a) and (lora_a_i := lora_a[i]) is not None:
+                self.lora_a_stacked[i][index, 0, : lora_a_i.shape[0], : lora_a_i.shape[1]].copy_(
+                    lora_a_i, non_blocking=True
+                )
+            if i < len(lora_b) and (lora_b_i := lora_b[i]) is not None:
+                self.lora_b_stacked[i][index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]].copy_(
+                    lora_b_i, non_blocking=True
+                )
 
     @classmethod
     @_not_fully_sharded_can_replace
