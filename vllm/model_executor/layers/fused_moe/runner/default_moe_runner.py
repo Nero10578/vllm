@@ -457,8 +457,10 @@ class DefaultMoERunner(MoERunner):
         transformed_hidden_dim = hidden_states.shape[-1]
         if (
             not self.quant_method.skip_forward_padding
-            and self.moe_config.hidden_dim != transformed_hidden_dim
+            and self.moe_config.hidden_dim > transformed_hidden_dim
         ):
+            # Only pad if the hidden_states is smaller than self.hidden_size
+            # If it's larger (e.g. padded with lora indices), don't crop it here
             hidden_states = F.pad(
                 hidden_states,
                 (0, self.moe_config.hidden_dim - transformed_hidden_dim),
