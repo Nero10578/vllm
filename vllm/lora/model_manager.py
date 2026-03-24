@@ -544,10 +544,10 @@ class LoRAModelManager:
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
-                        module.lora_a_stacked[0].shape[-1] if isinstance(module.lora_a_stacked, list, tuple) and len(module.lora_a_stacked) > 0 else module.lora_a_stacked.shape[-1] if not isinstance(module.lora_a_stacked, list) else 0,
-                        module.lora_b_stacked[0].shape[-2] if isinstance(module.lora_b_stacked, list, tuple) and len(module.lora_b_stacked) > 0 else module.lora_b_stacked.shape[-2] if not isinstance(module.lora_b_stacked, list) else 0,
+                        module.lora_a_stacked[0].shape[-1] if isinstance(module.lora_a_stacked, (list, tuple)) and len(module.lora_a_stacked) > 0 else module.lora_a_stacked.shape[-1] if not isinstance(module.lora_a_stacked, list) else 0,
+                        module.lora_b_stacked[0].shape[-2] if isinstance(module.lora_b_stacked, (list, tuple)) and len(module.lora_b_stacked) > 0 else module.lora_b_stacked.shape[-2] if not isinstance(module.lora_b_stacked, list) else 0,
                         rank,
-                        module.lora_a_stacked[0].dtype if isinstance(module.lora_a_stacked, list, tuple) and len(module.lora_a_stacked) > 0 else module.lora_a_stacked.dtype if not isinstance(module.lora_a_stacked, list) else torch.float16,
+                        module.lora_a_stacked[0].dtype if isinstance(module.lora_a_stacked, (list, tuple)) and len(module.lora_a_stacked) > 0 else module.lora_a_stacked.dtype if not isinstance(module.lora_a_stacked, list) else torch.float16,
                         "cpu",
                     )
                     model.loras[module_name] = lora
@@ -558,10 +558,10 @@ class LoRAModelManager:
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
-                        module.lora_a_stacked[i].shape[-1] if isinstance(module.lora_a_stacked, list, tuple) and len(module.lora_a_stacked) > i else module.lora_a_stacked[i].shape[-1] if not isinstance(module.lora_a_stacked, list) else 0,
-                        module.lora_b_stacked[i].shape[-2] if isinstance(module.lora_b_stacked, list, tuple) and len(module.lora_b_stacked) > i else module.lora_b_stacked[i].shape[-2] if not isinstance(module.lora_b_stacked, list) else 0,
+                        module.lora_a_stacked[i].shape[-1] if isinstance(module.lora_a_stacked, (list, tuple)) and len(module.lora_a_stacked) > i else module.lora_a_stacked[i].shape[-1] if not isinstance(module.lora_a_stacked, list) else 0,
+                        module.lora_b_stacked[i].shape[-2] if isinstance(module.lora_b_stacked, (list, tuple)) and len(module.lora_b_stacked) > i else module.lora_b_stacked[i].shape[-2] if not isinstance(module.lora_b_stacked, list) else 0,
                         rank,
-                        module.lora_a_stacked[i].dtype if isinstance(module.lora_a_stacked, list, tuple) and len(module.lora_a_stacked) > i else module.lora_a_stacked[i].dtype if not isinstance(module.lora_a_stacked, list) else torch.float16,
+                        module.lora_a_stacked[i].dtype if isinstance(module.lora_a_stacked, (list, tuple)) and len(module.lora_a_stacked) > i else module.lora_a_stacked[i].dtype if not isinstance(module.lora_a_stacked, list) else torch.float16,
                         "cpu",
                     )
                     subloras.append(lora)
