@@ -870,7 +870,7 @@ class OpenAIServingChat(OpenAIServing):
                             ) or (
                                 res.prompt_token_ids
                                 and reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids
+                                    res.prompt_token_ids[-3:]
                                 )
                             ):
                                 reasoning_end_arr[i] = True
@@ -966,7 +966,7 @@ class OpenAIServingChat(OpenAIServing):
                             if (
                                 res.prompt_token_ids
                                 and reasoning_parser.is_reasoning_end(
-                                    res.prompt_token_ids
+                                    res.prompt_token_ids[-3:]
                                 )
                             ):
                                 reasoning_end_arr[i] = True
