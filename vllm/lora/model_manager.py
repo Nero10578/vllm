@@ -555,6 +555,10 @@ class LoRAModelManager:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
                 subloras: list[LoRALayerWeights | None] = []
+                # Debug logging
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"Module: {module_name}, replacements: {replacements}, len(lora_a_stacked): {len(module.lora_a_stacked)}")
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
