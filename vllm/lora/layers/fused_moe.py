@@ -427,35 +427,45 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._create_lora_b_weights(max_loras, lora_config)
         # They will be used by 'LoRALayerWeights.create_dummy_lora_weights'
         # to create a dummy LoRA weights.
-        # TODO Optimize this section
-        self.lora_a_stacked = []
-        self.lora_b_stacked = []
-        for lora_id in range(max_loras):
-            for experts_id in range(self.base_layer.local_num_experts):
-                # For gated MoE: gate_proj (w1), down_proj (w2), up_proj (w3)
-                # For non-gated MoE: up_proj (w1), down_proj (w2)
-                self.lora_a_stacked.append(
-                    self.w13_lora_a_stacked[0][lora_id][experts_id]
-                )
-                self.lora_a_stacked.append(
-                    self.w2_lora_a_stacked[0][lora_id][experts_id]
-                )
+        # For MoE, lora_a_stacked and lora_b_stacked are tuples where each element
+        # corresponds to a module (w1, w2, w3) with shape (max_loras, 1, rank, input_size)
+        # to match the interface expected by create_dummy_lora in model_manager.py
+        # For non-gated MoE (_w13_slices == 1): w1 (up_proj), w2 (down_proj) - 2 modules
+        # For gated MoE (_w13_slices == 2): w1 (gate_proj), w2 (down_proj), w3 (up_proj) - 3 modules
+        num_modules = 2 if self._w13_slices == 1 else 3
 
-                self.lora_b_stacked.append(
-                    self.w13_lora_b_stacked[0][lora_id][experts_id]
-                )
-                self.lora_b_stacked.append(
-                    self.w2_lora_b_stacked[0][lora_id][experts_id]
-                )
-
-                # Only add w3 (up_proj) for gated MoE (_w13_slices == 2)
-                if self._w13_slices == 2:
-                    self.lora_a_stacked.append(
-                        self.w13_lora_a_stacked[1][lora_id][experts_id]
-                    )
-                    self.lora_b_stacked.append(
-                        self.w13_lora_b_stacked[1][lora_id][experts_id]
-                    )
+        # lora_a_stacked: each element has shape (max_loras, 1, rank, input_size)
+        # w1/w3: input_size = hidden_size
+        # w2: input_size = intermediate_size_per_partition
+        self.lora_a_stacked = tuple(
+            torch.zeros(
+                (
+                    max_loras,
+                    1,
+                    lora_config.max_lora_rank,
+                    self.base_layer.hidden_size if i in (0, 2) else self.base_layer.intermediate_size_per_partition,
+                ),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            )
+            for i in range(num_modules)
+        )
+        # lora_b_stacked: each element has shape (max_loras, 1, output_size, rank)
+        # w1/w3: output_size = intermediate_size_per_partition
+        # w2: output_size = hidden_size
+        self.lora_b_stacked = tuple(
+            torch.zeros(
+                (
+                    max_loras,
+                    1,
+                    self.base_layer.intermediate_size_per_partition if i in (0, 2) else self.base_layer.hidden_size,
+                    lora_config.max_lora_rank,
+                ),
+                dtype=lora_config.lora_dtype,
+                device=self.device,
+            )
+            for i in range(num_modules)
+        )
 
     def _slice_w13_a(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
         """
