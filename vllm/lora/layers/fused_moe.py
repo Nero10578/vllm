@@ -149,13 +149,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 ),
             )
 
-        if quant_config.use_mxfp4_w4a16:
-            assert isinstance(
-                m_fused_moe_fn.impl.fused_experts,
-                (MarlinExperts, UnfusedOAITritonExperts),
-            )
-        else:
-            assert isinstance(m_fused_moe_fn.impl.fused_experts, TritonExperts)
+        # Check if the fused_experts type is supported for LoRA
+        # Currently supported: TritonExperts, MarlinExperts, UnfusedOAITritonExperts
+        assert isinstance(
+            m_fused_moe_fn.impl.fused_experts,
+            (TritonExperts, MarlinExperts, UnfusedOAITritonExperts),
+        ), f"Unsupported experts type: {type(m_fused_moe_fn.impl.fused_experts)}. "
+        "LoRA is only supported with TritonExperts, MarlinExperts, or UnfusedOAITritonExperts."
 
         def fwd_decorator(layer, func):
             def wrapper(*args, **kwargs):
