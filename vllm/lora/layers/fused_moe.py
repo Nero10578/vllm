@@ -432,18 +432,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # to match the interface expected by create_dummy_lora in model_manager.py
         # For non-gated MoE (_w13_slices == 1): w1 (up_proj), w2 (down_proj) - 2 modules
         # For gated MoE (_w13_slices == 2): w1 (gate_proj), w2 (down_proj), w3 (up_proj) - 3 modules
+        # Note: The number of modules must match packed_modules_mapping["experts"]
         num_modules = 2 if self._w13_slices == 1 else 3
 
         # lora_a_stacked: each element has shape (max_loras, 1, rank, input_size)
-        # w1/w3: input_size = hidden_size
-        # w2: input_size = intermediate_size_per_partition
+        # w1 (gate_proj/up_proj): input_size = hidden_size
+        # w2 (down_proj): input_size = intermediate_size_per_partition
+        # w3 (up_proj): input_size = hidden_size
         self.lora_a_stacked = tuple(
             torch.zeros(
                 (
                     max_loras,
                     1,
                     lora_config.max_lora_rank,
-                    self.base_layer.hidden_size if i in (0, 2) else self.base_layer.intermediate_size_per_partition,
+                    self.base_layer.hidden_size if i != 1 else self.base_layer.intermediate_size_per_partition,
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -451,14 +453,15 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             for i in range(num_modules)
         )
         # lora_b_stacked: each element has shape (max_loras, 1, output_size, rank)
-        # w1/w3: output_size = intermediate_size_per_partition
-        # w2: output_size = hidden_size
+        # w1 (gate_proj): output_size = intermediate_size_per_partition
+        # w2 (down_proj): output_size = hidden_size
+        # w3 (up_proj): output_size = intermediate_size_per_partition
         self.lora_b_stacked = tuple(
             torch.zeros(
                 (
                     max_loras,
                     1,
-                    self.base_layer.intermediate_size_per_partition if i in (0, 2) else self.base_layer.hidden_size,
+                    self.base_layer.intermediate_size_per_partition if i != 1 else self.base_layer.hidden_size,
                     lora_config.max_lora_rank,
                 ),
                 dtype=lora_config.lora_dtype,
