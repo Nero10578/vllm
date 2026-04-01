@@ -433,12 +433,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # For non-gated MoE (_w13_slices == 1): w1 (up_proj), w2 (down_proj) - 2 modules
         # For gated MoE (_w13_slices == 2): w1 (gate_proj), w2 (down_proj), w3 (up_proj) - 3 modules
         # Note: The number of modules must match packed_modules_mapping["experts"]
-        # which contains entries for ALL experts (num_experts * num_modules)
         num_modules = 2 if self._w13_slices == 1 else 3
-        num_experts = self.base_layer.local_num_experts
 
         # lora_a_stacked: each element has shape (max_loras, 1, rank, input_size)
-        # For MoE, we need num_experts * num_modules elements to match packed_modules_mapping["experts"]
         # w1 (gate_proj/up_proj): input_size = hidden_size
         # w2 (down_proj): input_size = intermediate_size_per_partition
         # w3 (up_proj): input_size = hidden_size
@@ -448,12 +445,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     max_loras,
                     1,
                     lora_config.max_lora_rank,
-                    self.base_layer.hidden_size if (i % num_modules) != 1 else self.base_layer.intermediate_size_per_partition,
+                    self.base_layer.hidden_size if i != 1 else self.base_layer.intermediate_size_per_partition,
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
             )
-            for i in range(num_experts * num_modules)
+            for i in range(num_modules)
         )
         # lora_b_stacked: each element has shape (max_loras, 1, output_size, rank)
         # w1 (gate_proj): output_size = intermediate_size_per_partition
@@ -464,13 +461,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 (
                     max_loras,
                     1,
-                    self.base_layer.intermediate_size_per_partition if (i % num_modules) != 1 else self.base_layer.hidden_size,
+                    self.base_layer.intermediate_size_per_partition if i != 1 else self.base_layer.hidden_size,
                     lora_config.max_lora_rank,
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
             )
-            for i in range(num_experts * num_modules)
+            for i in range(num_modules)
         )
 
     def _slice_w13_a(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
