@@ -239,6 +239,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     sorted_token_ids_lora = sorted_token_ids_lora.view(
                         self.max_loras, -1
                     )
+                
+                # Convert global expert IDs to local expert IDs for EP
+                expert_ids_lora = self._convert_global_to_local_expert_ids(expert_ids_lora)
                 #
 
                 self.punica_wrapper.add_lora_fused_moe(
@@ -303,6 +306,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     sorted_token_ids_lora = sorted_token_ids_lora.view(
                         self.max_loras, -1
                     )
+                
+                # Convert global expert IDs to local expert IDs for EP
+                expert_ids_lora = self._convert_global_to_local_expert_ids(expert_ids_lora)
+                
                 intermediate_cache2 = moe_state_dict["intermediate_cache2"]
                 intermediate_cache3 = args[0]
 
@@ -571,6 +578,45 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         out[local_indices] = w[global_indices]
 
         return out
+
+    def _convert_global_to_local_expert_ids(
+        self, expert_ids: torch.Tensor | None
+    ) -> torch.Tensor | None:
+        """Convert global expert IDs to local expert IDs for EP.
+
+        Args:
+            expert_ids: Tensor with global expert IDs, or None.
+
+        Returns:
+            Tensor with local expert IDs, or None if input is None.
+        """
+        if expert_ids is None:
+            return None
+
+        expert_map = self.base_layer._expert_map
+        if expert_map is None:
+            # No EP (ep_size == 1) — nothing to convert.
+            return expert_ids
+
+        # expert_map may be extended with shared-expert entries (ROCm AITER).
+        # Only the first global_num_experts entries correspond to LoRA weights.
+        global_num_experts = expert_map.shape[0]
+        expert_map = expert_map[:global_num_experts]
+
+        # Convert global expert IDs to local expert IDs
+        # expert_ids can be 1D (naive_block_assignment) or 2D (max_loras, _)
+        if expert_ids.dim() == 1:
+            # 1D tensor: direct lookup
+            local_expert_ids = torch.full_like(expert_ids, -1, dtype=expert_ids.dtype)
+            valid_mask = (expert_ids >= 0) & (expert_ids < global_num_experts)
+            local_expert_ids[valid_mask] = expert_map[expert_ids[valid_mask]]
+        else:
+            # 2D tensor: (max_loras, _)
+            local_expert_ids = torch.full_like(expert_ids, -1, dtype=expert_ids.dtype)
+            valid_mask = (expert_ids >= 0) & (expert_ids < global_num_experts)
+            local_expert_ids[valid_mask] = expert_map[expert_ids[valid_mask]]
+
+        return local_expert_ids
 
     def set_lora(
         self,
