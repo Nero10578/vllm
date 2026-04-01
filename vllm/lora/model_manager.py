@@ -590,12 +590,36 @@ class LoRAModelManager:
                         logger.info(f"EP active: filtered replacements from {len(self.packed_modules_mapping[parts[-1]])} to {len(replacements)}")
                 
                 for i, r in enumerate(replacements):
+                    # For MoE, map the replacement to the correct module index in lora_a_stacked
+                    # replacements are organized as: experts.{expert_idx}.{module_name}
+                    # lora_a_stacked is organized by module type: [w1, w2, w3]
+                    if module.__class__.__name__ in ("FusedMoEWithLoRA", "FusedMoE3DWithLoRA"):
+                        # Extract module name from replacement string
+                        parts_r = r.split(".")
+                        if len(parts_r) >= 3 and parts_r[0] == "experts":
+                            module_name_in_replacement = parts_r[2]
+                            # Map module name to index in lora_a_stacked
+                            # For gated MoE: gate_proj -> 0, down_proj -> 1, up_proj -> 2
+                            # For non-gated MoE: up_proj -> 0, down_proj -> 1
+                            if module_name_in_replacement == "gate_proj":
+                                module_idx = 0
+                            elif module_name_in_replacement == "down_proj":
+                                module_idx = 1
+                            elif module_name_in_replacement == "up_proj":
+                                module_idx = 2 if module._w13_slices == 2 else 0
+                            else:
+                                module_idx = i % len(module.lora_a_stacked)
+                        else:
+                            module_idx = i % len(module.lora_a_stacked)
+                    else:
+                        module_idx = i
+                    
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
-                        module.lora_a_stacked[i].shape[-1],
-                        module.lora_b_stacked[i].shape[-2],
+                        module.lora_a_stacked[module_idx].shape[-1],
+                        module.lora_b_stacked[module_idx].shape[-2],
                         rank,
-                        module.lora_a_stacked[i].dtype,
+                        module.lora_a_stacked[module_idx].dtype,
                         "cpu",
                     )
                     subloras.append(lora)
