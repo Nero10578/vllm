@@ -559,6 +559,36 @@ class LoRAModelManager:
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.info(f"Module: {module_name}, replacements: {replacements}, len(lora_a_stacked): {len(module.lora_a_stacked)}")
+                
+                # Handle EP: filter global experts down to local experts
+                if module.__class__.__name__ in ("FusedMoEWithLoRA", "FusedMoE3DWithLoRA"):
+                    # Get the expert map from the base FusedMoE layer
+                    expert_map = module.base_layer.expert_map
+                    if expert_map is not None:
+                        # EP is active: filter replacements to only include local experts
+                        # replacements has format: ["experts.0.gate_proj", "experts.0.down_proj", ...]
+                        # expert_map maps global expert indices to local expert indices (-1 if not local)
+                        filtered_replacements = []
+                        for r in replacements:
+                            # Extract global expert index from replacement string
+                            # Format: "experts.{global_idx}.{module}"
+                            parts_r = r.split(".")
+                            if len(parts_r) >= 2 and parts_r[0] == "experts":
+                                try:
+                                    global_idx = int(parts_r[1])
+                                    local_idx = expert_map[global_idx].item()
+                                    if local_idx >= 0:
+                                        # This expert is local to this rank
+                                        filtered_replacements.append(r)
+                                except (ValueError, IndexError):
+                                    # Invalid format, keep it
+                                    filtered_replacements.append(r)
+                            else:
+                                # Not an expert replacement, keep it
+                                filtered_replacements.append(r)
+                        replacements = filtered_replacements
+                        logger.info(f"EP active: filtered replacements from {len(self.packed_modules_mapping[parts[-1]])} to {len(replacements)}")
+                
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
