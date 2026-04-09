@@ -1001,15 +1001,18 @@ def _get_tile_size(
     For Gemma3, use 32 for both prefill and decode to better utilize
     the larger head dimension (128/256). For other models, use
     the default vLLM behavior.
+    
+    Note: Reduced default tile sizes to prevent shared memory overflow
+    on ROCm GPUs with large context windows and quantized models.
     """
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
 
-    # Default behavior
+    # Default behavior - reduced tile sizes for ROCm/large context
     if is_prefill:
-        return 32
-    return 16 if element_size >= 2 else 32
+        return 16  # Reduced from 32 to prevent shared memory overflow
+    return 8 if element_size >= 2 else 16  # Reduced from 16/32
 
 
 def unified_attention(
