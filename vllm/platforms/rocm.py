@@ -70,6 +70,7 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     # RDNA 4 discrete (Navi 48)
     "0x7550": "AMD_Radeon_RX9070XT",  # gfx1201
     "0x7551": "AMD_Radeon_R9700",  # gfx1201
+    "0x73a1": "AMD_Radeon_PRO_V620",
 }
 
 
@@ -600,6 +601,16 @@ class RocmPlatform(Platform):
                 "Using Flash Attention (Triton backend) for ViT model on RDNA."
             )
             return AttentionBackendEnum.FLASH_ATTN
+            
+        # Triton prefill attention uses tiled/blocked computation, avoiding
+        # the N^2 memory allocation that TORCH_SDPA's "math" backend triggers
+        # on ROCm devices without efficient SDPA kernels (e.g. gfx906).
+        if dtype == torch.float16 or dtype == torch.bfloat16:
+            logger.info_once(
+                "No efficient SDPA backend available; using Triton attention "
+                "for ViT model to avoid N^2 memory allocation."
+            )
+            return AttentionBackendEnum.TRITON_ATTN
 
         logger.info_once("Using Torch SDPA backend for ViT model.")
         return AttentionBackendEnum.TORCH_SDPA
