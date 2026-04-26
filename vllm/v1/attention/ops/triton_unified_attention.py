@@ -490,16 +490,20 @@ def _get_tile_size(
     element_size: int,
     is_prefill: bool,
 ) -> int:
-    """Select tile size with Gemma3-specific optimization."""
+    """Select tile size with Gemma3-specific optimization.
+
+    Note: Reduced default tile sizes to prevent shared memory overflow
+    on ROCm GPUs with large context windows and quantized models.
+    """
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
 
-    # Default behavior
+    # Default behavior - reduced tile sizes for ROCm/large context
     if is_prefill:
-        return 32
+        return 16 # Reduced from 32 to prevent shared memory overflow
     # Note: tile size must be at least 32 for fp8 (element_size == 1).
-    return 16 if element_size >= 2 else 32
+    return 8 if element_size >= 2 else 16  # Reduced from 16/32
 
 
 def unified_attention(
