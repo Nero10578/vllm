@@ -1608,14 +1608,14 @@ class EngineArgs:
         if self.speculative_config is None:
             return None
 
-        # Note(Shangming): These parameters are not obtained from the cli arg
-        # '--speculative-config' and must be passed in when creating the engine
-        # config.
         # Handle the case where speculative_config is a string (e.g. from CLI)
         if isinstance(self.speculative_config, str):
             import json
             self.speculative_config = json.loads(self.speculative_config)
 
+        # Note(Shangming): These parameters are not obtained from the cli arg
+        # '--speculative-config' and must be passed in when creating the engine
+        # config.
         self.speculative_config.update(
             {
                 "target_model_config": target_model_config,
