@@ -112,6 +112,12 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         is_driver_worker: bool = False,
     ):
+        # Disable NCCL watchdog thread during CUDA graph capture to avoid
+        # hipErrorCapturedEvent errors on ROCm/HIP. The watchdog thread
+        # queries CUDA events which is illegal during graph capture.
+        # This MUST be set before any distributed initialization.
+        os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "0"
+
         super().__init__(
             vllm_config=vllm_config,
             local_rank=local_rank,
@@ -238,10 +244,6 @@ class Worker(WorkerBase):
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            # Disable NCCL watchdog thread during CUDA graph capture to avoid
-            # hipErrorCapturedEvent errors on ROCm/HIP. The watchdog thread
-            # queries CUDA events which is illegal during graph capture.
-            os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "0"
             parallel_config = self.parallel_config
             if (
                 parallel_config.distributed_executor_backend
@@ -1058,6 +1060,12 @@ def init_worker_distributed_environment(
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
+
+    # Disable NCCL watchdog thread during CUDA graph capture to avoid
+    # hipErrorCapturedEvent errors on ROCm/HIP. The watchdog thread
+    # queries CUDA events which is illegal during graph capture.
+    # This MUST be set before distributed backend initialization.
+    os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "0"
 
     init_batch_invariance()
     override_envs_for_eplb(parallel_config)
