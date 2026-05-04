@@ -238,6 +238,10 @@ class Worker(WorkerBase):
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            # Disable NCCL watchdog thread during CUDA graph capture to avoid
+            # hipErrorCapturedEvent errors on ROCm/HIP. The watchdog thread
+            # queries CUDA events which is illegal during graph capture.
+            os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] = "0"
             parallel_config = self.parallel_config
             if (
                 parallel_config.distributed_executor_backend
