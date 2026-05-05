@@ -496,6 +496,9 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
+        if current_platform.is_rocm():
+            torch.cuda.synchronize()
+
         with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
             yield graph_capture_context
 
