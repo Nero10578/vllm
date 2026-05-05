@@ -490,15 +490,18 @@ class GroupCoordinator:
                 if aiter_ar is not None:
                     maybe_aiter_context = aiter_ar.capture()  # type: ignore
 
+        
+
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
         curr_stream = torch.cuda.current_stream()
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
+        from vllm.platforms import current_platform
+
         if current_platform.is_rocm():
             torch.cuda.synchronize()
-
         with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
             yield graph_capture_context
 
