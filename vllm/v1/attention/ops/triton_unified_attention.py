@@ -546,6 +546,9 @@ def unified_attention(
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
 
+    is_hip = current_platform.is_rocm()
+    hip_kwargs = dict(num_warps=4, num_stages=1) if is_hip else {}
+
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
 
@@ -727,6 +730,7 @@ def unified_attention(
         KV_QUANT_MODE=kv_quant_mode,
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,
+        **hip_kwargs,
     )
 
     if use_3d:
@@ -749,4 +753,5 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
+            **hip_kwargs,
         )
