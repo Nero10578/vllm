@@ -1620,7 +1620,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
   }
 }
 
-#elif defined(__GFX11__)
+#elif defined(__gfx1030__) || defined(__GFX11__)
 
 using floatx8 = __attribute__((__vector_size__(8 * sizeof(float)))) float;
 
