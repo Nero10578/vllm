@@ -185,6 +185,8 @@ def _get_gcn_arch() -> str:
 # These are plain Python bools — fully torch.compile/Dynamo safe.
 _GCN_ARCH = _get_gcn_arch()
 
+_ON_GFX10X = any(arch in _GCN_ARCH for arch in ["gfx10"])
+_ON_GFX1030 = any(arch in _GCN_ARCH for arch in ["gfx103"])
 _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
@@ -265,6 +267,16 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     return (major, minor)
 
 
+def on_gfx10x() -> bool:
+    """True for RDNA1 (gfx1010) and RDNA2 (gfx1030) architectures."""
+    return _ON_GFX10X
+
+
+def on_gfx1030() -> bool:
+    """True for RDNA2 gfx1030 (Navi 21/Navi 22/Navi 23) GPUs."""
+    return _ON_GFX1030
+
+
 def on_gfx1x() -> bool:
     return _ON_GFX1X
 
@@ -318,7 +330,22 @@ def use_rocm_custom_paged_attention(
             and sinks is None
         )
 
-    else:
+    # RDNA2 (gfx1030) custom paged attention: wave32 native, 64KB LDS per CU.
+    # Supports block_size 16 and head_size 128 (like RDNA3) but also
+    # block_size 32 for smaller models. GQA ratio 1-16 supported.
+    if _ON_GFX1030:
+        return (
+            (sliding_window == 0 or sliding_window == (-1, -1))
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and (head_size == 64 or head_size == 128)
+            and (block_size == 16 or block_size == 32)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16)
+            and max_seq_len <= 128 * 1024
+            and sinks is None
+        )
+
+    # All other RDNA (gfx1x, gfx10x non-1030)
+    if _ON_GFX1X:
         return (
             _ON_GFX1X
             and (sliding_window == 0 or sliding_window == (-1, -1))
@@ -332,10 +359,12 @@ def use_rocm_custom_paged_attention(
             and sinks is None
         )
 
+    return False
+
 
 @cache
 def flash_attn_triton_available() -> bool:
-    if not on_gfx1x():
+    if not (on_gfx1x() or on_gfx10x()):
         return False
     try:
         from importlib.util import find_spec
@@ -601,9 +630,9 @@ class RocmPlatform(Platform):
             logger.info_once("Using Flash Attention backend for ViT model.")
             return AttentionBackendEnum.FLASH_ATTN
 
-        # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend
+        # RDNA2/RDNA3/RDNA4 (gfx10xx/gfx11xx/gfx12xx): Use Flash Attention Triton backend
         if (
-            on_gfx1x()
+            (on_gfx1x() or on_gfx1030())
             and flash_attn_triton_available()
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):

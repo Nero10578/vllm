@@ -35,9 +35,11 @@ import torch
 from packaging import version
 
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx1030
 from vllm.triton_utils import tl, triton
 
 is_hip_ = current_platform.is_rocm()
+is_gfx1030_ = is_hip_ and on_gfx1030()
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +208,7 @@ def _decode_att_m_fwd(
     k_scale,
     v_scale,
 ):
-    BLOCK = 64 if not is_hip_ else 8
+    BLOCK = 64 if not is_hip_ else 16 if is_gfx1030_ else 8
 
     NUM_KV_SPLITS = num_kv_splits
     Lk = k_buffer.shape[-1]
@@ -219,7 +221,7 @@ def _decode_att_m_fwd(
 
     num_warps = 4
     if kv_group_num != 1:
-        num_warps = 1 if is_hip_ else 2
+        num_warps = 2 if is_gfx1030_ else 1 if is_hip_ else 2
 
     BLOCK_DMODEL = triton.next_power_of_2(Lk)
     BLOCK_DV = triton.next_power_of_2(Lv)
@@ -480,7 +482,7 @@ def _decode_grouped_att_m_fwd(
 
     BLOCK = 32
     if is_hip_:
-        BLOCK = 16
+        BLOCK = 32 if is_gfx1030_ else 16
 
     batch, head_num = q.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
@@ -498,7 +500,11 @@ def _decode_grouped_att_m_fwd(
     if is_hip_:
         # https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html#mi300x-triton-kernel-performance-optimization
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+        # RDNA2 (gfx1030): Wave32 native allows higher waves_per_eu occupancy.
+        if is_gfx1030_:
+            extra_kargs = {"waves_per_eu": 2, "matrix_instr_nonkdim": 16, "kpack": 2}
+        else:
+            extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
     elif not is_hip_ and BLOCK_DMODEL >= 1024:
         # Avoid shared memory overflow on NVIDIA when BLOCK_DMODEL is large
@@ -631,7 +637,12 @@ def _decode_softmax_reducev_fwd(
     if is_hip_:
         # https://rocm.docs.amd.com/en/docs-6.2.0/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
+        # RDNA2: Wave32 native, higher waves_per_eu for similar occupancy
+        extra_kargs = {
+            "waves_per_eu": 8 if is_gfx1030_ else 4,
+            "matrix_instr_nonkdim": 16,
+            "kpack": 2,
+        }
 
     grid = (batch, head_num)
     _fwd_kernel_stage2[grid](

@@ -30,9 +30,12 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 )
 from vllm.v1.kv_cache_interface import KVQuantMode
 
+from vllm.platforms.rocm import on_gfx1030
+
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
+_IS_GFX1030 = current_platform.is_rocm() and on_gfx1030()
 
 
 @triton.jit
@@ -490,20 +493,26 @@ def _get_tile_size(
     element_size: int,
     is_prefill: bool,
 ) -> int:
-    """Select tile size with Gemma3-specific optimization.
+    """Select tile size with Gemma3 and RDNA2-specific optimization.
 
     Note: Reduced default tile sizes to prevent shared memory overflow
     on ROCm GPUs with large context windows and quantized models.
+
+    RDNA2 (gfx1030): Uses Wave32 natively. Larger tile sizes than generic
+    ROCm path are safe because Wave32 reduces per-block VGPR pressure
+    while still fitting in 64KB LDS.
     """
     if _is_gemma3_attention(head_size, sliding_window):
-        # Gemma3: use 32 for decode (default is 16)
         return 32
 
-    # Default behavior - reduced tile sizes for ROCm/large context
+    if _IS_GFX1030:
+        if is_prefill:
+            return 32
+        return 16
+
     if is_prefill:
-        return 16 # Reduced from 32 to prevent shared memory overflow
-    # Note: tile size must be at least 32 for fp8 (element_size == 1).
-    return 8 if element_size >= 2 else 16  # Reduced from 16/32
+        return 16
+    return 8 if element_size >= 2 else 16
 
 
 def unified_attention(

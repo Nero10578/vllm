@@ -209,9 +209,19 @@ def triton_w4a16_gemm(
     zeros_ptr = qzeros if has_zp else b_q
 
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx1x
+        from vllm.platforms.rocm import on_gfx1030, on_gfx1x
 
-        if on_gfx1x():
+        if on_gfx1030():
+            # Tuned for RDNA2 (gfx1030, Navi 21/22/23, Wave32).
+            # BLOCK_K=64 gives good dot-product instruction utilization
+            # on Wave32 with the V_DOT2_F32_F16 and V_DOT4_I32_I8 ops.
+            if M <= 32:
+                BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 64
+            elif M <= 64:
+                BLOCK_M, BLOCK_N, BLOCK_K = 64, 32, 64
+            else:
+                BLOCK_M, BLOCK_N, BLOCK_K = 128, 32, 64
+        elif on_gfx1x():
             # Tuned for RDNA 3.5 (gfx1151, 40 CUs, 32-wide wavefronts).
             if M <= 32:
                 BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 64
