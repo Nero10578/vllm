@@ -386,8 +386,8 @@ def triton_reshape_and_cache_flash(
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
     if current_platform.is_rocm() or current_platform.is_xpu():
-        num_stages = 4
-        num_warps = 8
+        num_stages = 2
+        num_warps = 4
     else:  # cuda
         num_stages = 10
         num_warps = 16
@@ -563,8 +563,8 @@ def triton_reshape_and_cache_flash_diffkv(
     TILE_SIZE = max(head_size_k, head_size_v)
     TILE_SIZE = triton.next_power_of_2(TILE_SIZE)
     if current_platform.is_rocm() or current_platform.is_xpu():
-        num_stages = 4
-        num_warps = 8
+        num_stages = 2
+        num_warps = 4
     else:  # cuda
         num_stages = 10
         num_warps = 16

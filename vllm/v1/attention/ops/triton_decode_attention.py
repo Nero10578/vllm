@@ -206,7 +206,7 @@ def _decode_att_m_fwd(
     k_scale,
     v_scale,
 ):
-    BLOCK = 64 if not is_hip_ else 8
+    BLOCK = 64 if not is_hip_ else 32
 
     NUM_KV_SPLITS = num_kv_splits
     Lk = k_buffer.shape[-1]
@@ -219,7 +219,7 @@ def _decode_att_m_fwd(
 
     num_warps = 4
     if kv_group_num != 1:
-        num_warps = 1 if is_hip_ else 2
+        num_warps = 4 if is_hip_ else 2
 
     BLOCK_DMODEL = triton.next_power_of_2(Lk)
     BLOCK_DV = triton.next_power_of_2(Lv)
@@ -252,7 +252,7 @@ def _decode_att_m_fwd(
         PAGE_SIZE=page_size,
         logit_cap=logit_cap,
         num_warps=num_warps,
-        num_stages=2,
+        num_stages=1 if is_hip_ else 2,
         Lk=Lk,
         Lv=Lv,
     )
@@ -479,8 +479,6 @@ def _decode_grouped_att_m_fwd(
     BLOCK_DV = triton.next_power_of_2(Lv)
 
     BLOCK = 32
-    if is_hip_:
-        BLOCK = 16
 
     batch, head_num = q.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
@@ -649,7 +647,7 @@ def _decode_softmax_reducev_fwd(
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
         num_warps=4,
-        num_stages=2,
+        num_stages=1 if is_hip_ else 2,
         **extra_kargs,
     )
 

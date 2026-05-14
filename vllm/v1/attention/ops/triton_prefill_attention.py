@@ -184,6 +184,8 @@ def get_block_size(dtype: torch.dtype) -> int:
         80
     ):
         return 128
+    elif current_platform.is_rocm():
+        return 32
     else:
         return 64
 
@@ -219,7 +221,7 @@ def context_attention_fwd(
     kv_group_num = q.shape[1] // k.shape[1]
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
-    num_warps = 4 if Lk <= 64 else 8
+    num_warps = 4
 
     sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
     sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
