@@ -330,19 +330,11 @@ def use_rocm_custom_paged_attention(
             and sinks is None
         )
 
-    # RDNA2 (gfx1030) custom paged attention: wave32 native, 64KB LDS per CU.
-    # Supports block_size 16 and head_size 128 (like RDNA3) but also
-    # block_size 32 for smaller models. GQA ratio 1-16 supported.
+    # RDNA2 (gfx1030) custom paged attention: the C++ WMMA kernels in
+    # attention.cu require gfx11-insts target feature which RDNA2 lacks.
+    # Route through Triton attention instead.
     if _ON_GFX1030:
-        return (
-            (sliding_window == 0 or sliding_window == (-1, -1))
-            and (qtype == torch.half or qtype == torch.bfloat16)
-            and (head_size == 64 or head_size == 128)
-            and (block_size == 16 or block_size == 32)
-            and (gqa_ratio >= 1 and gqa_ratio <= 16)
-            and max_seq_len <= 128 * 1024
-            and sinks is None
-        )
+        return False
 
     # All other RDNA (gfx1x, gfx10x non-1030)
     if _ON_GFX1X:
