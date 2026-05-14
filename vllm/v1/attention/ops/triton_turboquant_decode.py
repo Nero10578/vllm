@@ -549,7 +549,16 @@ def triton_turboquant_decode_attention(
 
     # Stage 1: split-KV tiled attention scoring + value accumulation
     fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
-    BLOCK_KV = 4
+
+    from vllm.platforms.rocm import on_gfx1030
+
+    if on_gfx1030():
+        BLOCK_KV = 8
+        num_warps = 2
+    else:
+        BLOCK_KV = 4
+        num_warps = 1
+
     grid = (B, Hq, NUM_KV_SPLITS)
     _tq_decode_stage1[grid](
         q_rot,
@@ -583,7 +592,7 @@ def triton_turboquant_decode_attention(
         KEY_FP8=1 if key_fp8 else 0,
         NORM_CORRECTION=1 if norm_correction else 0,
         FP8_E4B15=fp8_e4b15,
-        num_warps=1,
+        num_warps=num_warps,
         num_stages=1,
     )
 

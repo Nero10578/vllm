@@ -386,8 +386,13 @@ def triton_reshape_and_cache_flash(
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
     if current_platform.is_rocm() or current_platform.is_xpu():
+        from vllm.platforms.rocm import on_gfx1030
+
         num_stages = 4
-        num_warps = 8
+        if on_gfx1030():
+            num_warps = 4
+        else:
+            num_warps = 8
     else:  # cuda
         num_stages = 10
         num_warps = 16

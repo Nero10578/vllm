@@ -31,6 +31,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2
+from vllm.platforms.rocm import on_gfx1030
 
 
 @triton.jit
@@ -184,8 +185,11 @@ def get_block_size(dtype: torch.dtype) -> int:
         80
     ):
         return 128
-    else:
-        return 64
+
+    if on_gfx1030():
+        return 32
+
+    return 64
 
 
 def context_attention_fwd(
@@ -219,10 +223,17 @@ def context_attention_fwd(
     kv_group_num = q.shape[1] // k.shape[1]
 
     grid = (batch, head, triton.cdiv(max_input_len, BLOCK))
-    num_warps = 4 if Lk <= 64 else 8
+    if on_gfx1030():
+        num_warps = 2 if Lk <= 64 else 4
+    else:
+        num_warps = 4 if Lk <= 64 else 8
 
     sliding_window_q = sliding_window_q if sliding_window_q is not None else 0
     sliding_window_k = sliding_window_k if sliding_window_k is not None else 0
+
+    extra_kargs = {}
+    if on_gfx1030():
+        extra_kargs = {"waves_per_eu": 2, "matrix_instr_nonkdim": 16, "kpack": 2}
 
     _fwd_kernel[grid](
         q,
@@ -250,4 +261,5 @@ def context_attention_fwd(
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,
+        **extra_kargs,
     )

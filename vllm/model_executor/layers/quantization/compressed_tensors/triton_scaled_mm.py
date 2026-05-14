@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -177,9 +178,21 @@ def triton_scaled_mm(
     has_scalar = lambda x: x.shape[0] == 1 and x.shape[1] == 1
 
     if use_heuristic:
+        from vllm.platforms.rocm import on_gfx1030
+
         is_small_N = N < 8192
         next_power_of_2_M = max(32, triton.next_power_of_2(M))
-        if next_power_of_2_M <= 32:
+
+        if on_gfx1030():
+            if next_power_of_2_M <= 32:
+                tile_shape = (32, 32, 128) if is_small_N else (32, 64, 128)
+            elif next_power_of_2_M <= 64:
+                tile_shape = (64, 32, 128)
+            elif next_power_of_2_M <= 128:
+                tile_shape = (64, 64, 64)
+            else:
+                tile_shape = (128, 64, 64)
+        elif next_power_of_2_M <= 32:
             tile_shape = (64, 64, 256) if is_small_N else (64, 128, 256)
         elif next_power_of_2_M <= 64:
             tile_shape = (64, 64, 256)

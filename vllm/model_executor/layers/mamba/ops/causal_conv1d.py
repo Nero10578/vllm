@@ -10,6 +10,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
+from vllm.platforms.rocm import on_gfx1030
 
 
 @triton.jit()
@@ -576,7 +577,7 @@ def causal_conv1d_fn(
     stride_istate_dim = 0
     stride_istate_token = 0
     num_cache_lines = 0
-    BLOCK_M = 8
+    BLOCK_M = 16 if on_gfx1030() else 8
     if conv_states is not None:
         # extensions to support vLLM:
         # 1. conv_states is used to replaced initial_states
