@@ -664,12 +664,21 @@ def unified_attention(
     num_segments = num_par_softmax_segments if use_3d else 1
 
     grid: tuple[Any, ...]
+    extra_kargs: dict = {}
+    num_warps = 4
+    num_stages = 1
     if not use_3d:
         grid = (total_num_q_blocks, num_kv_heads)
         tile_size = TILE_SIZE_PREFILL
+        if _IS_GFX1030:
+            extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
+            num_stages = 2
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
+        if _IS_GFX1030:
+            extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
+            num_stages = 2
 
     kernel_unified_attention[grid](
         output_ptr=out,
@@ -736,6 +745,9 @@ def unified_attention(
         KV_QUANT_MODE=kv_quant_mode,
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        **extra_kargs,
     )
 
     if use_3d:
