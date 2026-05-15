@@ -509,7 +509,7 @@ def _get_tile_size(
 
     if _IS_GFX1030:
         if is_prefill:
-            return 32
+            return 48
         return 32
 
     if is_prefill:
