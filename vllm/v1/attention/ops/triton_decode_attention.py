@@ -498,17 +498,12 @@ def _decode_grouped_att_m_fwd(
     extra_kargs = {}
     num_stages = 2
     if is_hip_:
-        # https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html#mi300x-triton-kernel-performance-optimization
-        # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        # RDNA2 (gfx1030): Wave32 native on 60-CU GPU.
-        # Prioritize occupancy: smaller tiles, higher waves_per_eu,
-        # pipelined memory (num_stages=2).
         if is_gfx1030_:
             extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
             num_stages = 2
         else:
             extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
-        num_stages = 1
+            num_stages = 1
     elif not is_hip_ and BLOCK_DMODEL >= 1024:
         # Avoid shared memory overflow on NVIDIA when BLOCK_DMODEL is large
         # like non-MLA D_QK=576, BLOCK_DMODEL=1024, BLOCK_H=16
