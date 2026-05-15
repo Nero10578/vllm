@@ -27,6 +27,10 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+try:
+    from vllm.platforms.rocm import _ON_NO_NATIVE_FP8
+except ImportError:
+    _ON_NO_NATIVE_FP8 = False
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     get_tma_aligned_size,
@@ -724,6 +728,7 @@ def _w8a8_triton_block_scaled_mm(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    ON_NO_NATIVE_FP8: tl.constexpr,
 ):
     """Triton-accelerated function used to perform linear operations (dot
     product) on input tensors `A` and `B` with block-wise quantization, and
@@ -746,21 +751,37 @@ def _w8a8_triton_block_scaled_mm(
     a_ptrs = A + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = B + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
-    As_ptrs = As + offs_am * stride_As_m
+    if not ON_NO_NATIVE_FP8:
+        As_ptrs = As + offs_am * stride_As_m
     offs_bsn = offs_bn // group_n
     Bs_ptrs = Bs + offs_bsn * stride_Bs_n
 
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        if ON_NO_NATIVE_FP8:
+            a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0)
+
+            b_sign = (b & 0x80).to(tl.uint16) << 8
+            b_exp = ((b & 0x78) >> 3).to(tl.uint16)
+            b_exp = tl.where(b_exp == 0, tl.zeros_like(b_exp), b_exp + 8)
+            b_mant = (b & 0x07).to(tl.uint16) << 7
+            b_bits = b_sign | (b_exp << 10) | b_mant
+            b = b_bits.to(tl.float16, bitcast=True)
+        else:
+            a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0)
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0)
 
         k_start = k * BLOCK_SIZE_K
         offs_ks = k_start // group_k
-        a_s = tl.load(As_ptrs + offs_ks * stride_As_k)
+        if not ON_NO_NATIVE_FP8:
+            a_s = tl.load(As_ptrs + offs_ks * stride_As_k)
         b_s = tl.load(Bs_ptrs + offs_ks * stride_Bs_k)
 
-        accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+        if ON_NO_NATIVE_FP8:
+            accumulator += tl.dot(a, b) * b_s[None, :]
+        else:
+            accumulator += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
@@ -908,6 +929,7 @@ def w8a8_triton_block_scaled_mm(
         As.stride(-1),
         Bs.stride(1),
         Bs.stride(0),
+        ON_NO_NATIVE_FP8=_ON_NO_NATIVE_FP8,
         **config,
     )
 

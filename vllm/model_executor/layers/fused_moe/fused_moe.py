@@ -31,6 +31,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
 )
 from vllm.platforms import current_platform
+try:
+    from vllm.platforms.rocm import _ON_NO_NATIVE_FP8
+except ImportError:
+    _ON_NO_NATIVE_FP8 = False
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -345,6 +349,7 @@ def fused_moe_kernel(
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    ON_NO_NATIVE_FP8: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -496,12 +501,25 @@ def fused_moe_kernel(
             if group_k > 0 and group_n > 0:
                 k_start = k * BLOCK_SIZE_K
                 offs_ks = k_start // group_k
-                a_scale = tl.load(
-                    a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
-                )
+                if not ON_NO_NATIVE_FP8:
+                    a_scale = tl.load(
+                        a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
+                    )
+                else:
+                    # Bitwise E4M3 -> FP16 dequant for B (b is already uint8)
+                    b_sign = (b & 0x80).to(tl.uint16) << 8
+                    b_exp = ((b & 0x78) >> 3).to(tl.uint16)
+                    b_exp = tl.where(b_exp == 0, tl.zeros_like(b_exp), b_exp + 8)
+                    b_mant = (b & 0x07).to(tl.uint16) << 7
+                    b_bits = b_sign | (b_exp << 10) | b_mant
+                    b = b_bits.to(tl.float16, bitcast=True)
+                
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
 
-                accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
+                if ON_NO_NATIVE_FP8:
+                    accumulator += tl.dot(a, b) * b_scale[None, :]
+                else:
+                    accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
             else:
                 if use_fp8_w8a8:
                     # acc used to enable fp8_fast_accum
@@ -812,6 +830,7 @@ def invoke_fused_moe_triton_kernel(
         naive_block_assignment=(sorted_token_ids is None),
         HAS_BIAS=HAS_BIAS,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
+        ON_NO_NATIVE_FP8=_ON_NO_NATIVE_FP8,
         **config,
     )
 

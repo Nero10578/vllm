@@ -1266,6 +1266,68 @@ __global__ void cp_gather_cache(
 }
 }  // namespace vllm
 
+// -------------------------------------------------------------------------
+// LOCAL VECTOR HELPERS
+// -------------------------------------------------------------------------
+
+template<typename T, int N>
+struct BuiltinVec;
+
+template<> struct BuiltinVec<float, 4> { using Type = float4; };
+template<> struct BuiltinVec<uint16_t, 4> { using Type = float2; };
+template<> struct BuiltinVec<at::Half, 4> { using Type = float2; };
+
+template<typename T, int N>
+__device__ __forceinline__ typename BuiltinVec<std::remove_cv_t<T>, N>::Type* vec_ptr(T* ptr) {
+    using NonConstT = std::remove_cv_t<T>;
+    return reinterpret_cast<typename BuiltinVec<NonConstT, N>::Type*>(const_cast<NonConstT*>(ptr));
+}
+
+// -------------------------------------------------------------------------
+// Kernel: Gather K from Cache (vectorized fp16)
+// -------------------------------------------------------------------------
+template <typename scalar_t, int BLOCK_Y_SIZE>
+__global__ void cp_gather_indexer_k_cache_fp16_kernel(
+    const uint16_t* __restrict__ kv_cache,
+    scalar_t* __restrict__ dst_k,
+    const int* __restrict__ block_table,
+    const int* __restrict__ cu_seq_lens,
+    const int batch_size,
+    const int64_t token_stride,
+    const int64_t head_dim,
+    const int64_t block_stride,
+    const int64_t cache_block_size,
+    const int num_blocks,
+    const int num_tokens) {
+
+    constexpr int VEC_SIZE = 4;
+    using DstVecType = typename BuiltinVec<scalar_t, VEC_SIZE>::Type;
+    using CacheVecType = typename BuiltinVec<uint16_t, VEC_SIZE>::Type;
+
+    const int token_idx = blockIdx.x * blockDim.y + threadIdx.y;
+    const int head_idx = (blockIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
+
+    if (token_idx >= num_tokens) return;
+    if (head_idx >= head_dim) return;
+
+    const int block_offset = block_table[token_idx * num_blocks];
+    const int64_t src_offset = block_offset * block_stride + head_idx;
+    const int64_t dst_offset = token_idx * token_stride + head_idx;
+
+    CacheVecType loaded_vec = *vec_ptr<const uint16_t, VEC_SIZE>(&kv_cache[src_offset]);
+    const uint16_t* loaded_raw = reinterpret_cast<const uint16_t*>(&loaded_vec);
+
+    if constexpr (std::is_same<scalar_t, at::Half>::value) {
+        *vec_ptr<scalar_t, VEC_SIZE>(&dst_k[dst_offset]) =
+            *reinterpret_cast<const DstVecType*>(&loaded_vec);
+    } else {
+        dst_k[dst_offset + 0] = static_cast<scalar_t>(loaded_raw[0]);
+        dst_k[dst_offset + 1] = static_cast<scalar_t>(loaded_raw[1]);
+        dst_k[dst_offset + 2] = static_cast<scalar_t>(loaded_raw[2]);
+        dst_k[dst_offset + 3] = static_cast<scalar_t>(loaded_raw[3]);
+    }
+}
+
 // Macro to dispatch the kernel based on the data type.
 #define CALL_CP_GATHER_CACHE(CPY_DTYPE)                                 \
   vllm::cp_gather_cache<CPY_DTYPE><<<grid, block, 0, stream>>>(         \

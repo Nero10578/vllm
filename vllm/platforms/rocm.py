@@ -194,6 +194,28 @@ _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 _ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
+_ON_GFX906 = "gfx906" in _GCN_ARCH
+# GPUs without native FP8 hardware support (software FP8 emulation required)
+_ON_NO_NATIVE_FP8 = _ON_GFX906 or _ON_GFX1030
+
+
+def _set_rocm_nccl_workarounds():
+    """Disable NCCL watchdog/monitoring threads on ROCm to prevent
+    hipErrorCapturedEvent during CUDA graph capture with tensor parallelism.
+
+    The PyTorch NCCL watchdog thread queries HIP events via hipEventQuery,
+    which throws hipErrorCapturedEvent when events belong to a capturing
+    stream. TORCH_NCCL_BLOCKING_WAIT=1 is the only way to prevent the
+    watchdog from starting (TORCH_NCCL_ASYNC_ERROR_HANDLING=0 only changes
+    the error handling mode but does NOT stop the watchdog).
+    """
+    os.environ.setdefault("TORCH_NCCL_BLOCKING_WAIT", "1")
+    os.environ.setdefault("TORCH_NCCL_ENABLE_MONITORING", "0")
+    os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "0")
+    os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "0")
+
+
+_set_rocm_nccl_workarounds()
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:

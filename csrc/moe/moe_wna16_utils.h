@@ -78,22 +78,19 @@ class ScalarType<nv_bfloat16> {
 #endif
 };
 
-template <int lut>
-__device__ inline int lop3(int a, int b, int c) {
-  int res;
-  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
-               : "=r"(res)
-               : "r"(a), "r"(b), "r"(c), "n"(lut));
-  return res;
-}
-
-template <int start_byte, int mask>
-__device__ inline uint32_t prmt(uint32_t a) {
-  uint32_t res;
-  asm volatile("prmt.b32 %0, %1, %2, %3;\n"
-               : "=r"(res)
-               : "r"(a), "n"(start_byte), "n"(mask));
-  return res;
+__device__ __forceinline__ uint32_t bfi(const uint32_t S0, const uint32_t S1,
+                                        const uint32_t S2) {
+#if defined(USE_ROCM)
+  uint32_t result;
+  __asm__ (
+    "  v_bfi_b32  %0, %1, %2, %3  \n"
+    : "=v" (result)
+    : "v"(S0), "v"(S1), "v"(S2)
+  );
+  return result;
+#else
+  return (S0 & S1) | (~S0 & S2);
+#endif
 }
 
 template <typename scalar_t2, int bit>
@@ -108,11 +105,11 @@ __device__ inline void dequant<half2, 4>(int q, half2* res) {
   const int MUL = 0x2c002c00;
   const int ADD = 0xd400d400;
 
-  int lo0 = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
-  int hi0 = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+  int lo0 = bfi(LO, q, EX);
+  int hi0 = bfi(HI, q, EX);
   q >>= 8;
-  int lo1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
-  int hi1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
+  int lo1 = bfi(LO, q, EX);
+  int hi1 = bfi(HI, q, EX);
 
   res[0] = __hsub2(*reinterpret_cast<half2*>(&lo0),
                    *reinterpret_cast<const half2*>(&SUB));
@@ -132,8 +129,8 @@ __device__ inline void dequant<half2, 8>(int q, half2* res) {
   static constexpr uint32_t mask_for_elt_23 = 0x5351;
   static constexpr uint32_t start_byte_for_fp16 = 0x64646464;
 
-  uint32_t lo = prmt<start_byte_for_fp16, mask_for_elt_01>(q);
-  uint32_t hi = prmt<start_byte_for_fp16, mask_for_elt_23>(q);
+  uint32_t lo = __byte_perm(q, start_byte_for_fp16, mask_for_elt_01);
+  uint32_t hi = __byte_perm(q, start_byte_for_fp16, mask_for_elt_23);
 
   static constexpr uint32_t I8s_TO_F16s_MAGIC_NUM = 0x64006400;
 
@@ -149,13 +146,13 @@ __device__ inline void dequant<nv_bfloat162, 4>(int q, nv_bfloat162* res) {
   static constexpr uint32_t MASK = 0x000f000f;
   static constexpr uint32_t EX = 0x43004300;
 
-  int lo0 = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  int lo0 = bfi(MASK, q, EX);
   q >>= 4;
-  int hi0 = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  int hi0 = bfi(MASK, q, EX);
   q >>= 4;
-  int lo1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  int lo1 = bfi(MASK, q, EX);
   q >>= 4;
-  int hi1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, MASK, EX);
+  int hi1 = bfi(MASK, q, EX);
 
   static constexpr uint32_t MUL = 0x3F803F80;
   static constexpr uint32_t ADD = 0xC300C300;
