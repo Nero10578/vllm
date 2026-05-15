@@ -482,7 +482,7 @@ def _decode_grouped_att_m_fwd(
 
     BLOCK = 32
     if is_hip_:
-        BLOCK = 32 if is_gfx1030_ else 16
+        BLOCK = 16 if is_gfx1030_ else 16  # gfx1030 hardcoded for 60-CU W6800: smaller tile for occupancy
 
     batch, head_num = q.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
@@ -500,9 +500,12 @@ def _decode_grouped_att_m_fwd(
     if is_hip_:
         # https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html#mi300x-triton-kernel-performance-optimization
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
-        # RDNA2 (gfx1030): Wave32 native allows higher waves_per_eu occupancy.
+        # RDNA2 (gfx1030): Wave32 native on 60-CU GPU.
+        # Prioritize occupancy: smaller tiles, higher waves_per_eu,
+        # pipelined memory (num_stages=2).
         if is_gfx1030_:
-            extra_kargs = {"waves_per_eu": 2, "matrix_instr_nonkdim": 16, "kpack": 2}
+            extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
+            num_stages = 2
         else:
             extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
@@ -639,7 +642,7 @@ def _decode_softmax_reducev_fwd(
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
         # RDNA2: Wave32 native, higher waves_per_eu for similar occupancy
         extra_kargs = {
-            "waves_per_eu": 8 if is_gfx1030_ else 4,
+            "waves_per_eu": 4 if is_gfx1030_ else 4,
             "matrix_instr_nonkdim": 16,
             "kpack": 2,
         }
