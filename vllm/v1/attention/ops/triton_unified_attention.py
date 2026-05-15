@@ -499,18 +499,16 @@ def _get_tile_size(
     on ROCm GPUs with large context windows and quantized models.
 
     RDNA2 (gfx1030): Uses Wave32 natively. Larger tile sizes than generic
-    ROCm path are safe because Wave32 reduces per-block VGPR pressure.
-    For the 60-CU W6800, TILE_SIZE=48 (2D) / 32 (3D) cuts KV page
-    memory transactions in half vs 32/16 to reduce GDDR6 bandwidth
-    pressure on large-context decodes while fitting within 64KB LDS.
-"""
+    ROCm path are safe because Wave32 reduces per-block VGPR pressure
+    while still fitting in 64KB LDS.
+    """
     if _is_gemma3_attention(head_size, sliding_window):
         return 32
 
     if _IS_GFX1030:
         if is_prefill:
-            return 48
-        return 32
+            return 32
+        return 16
 
     if is_prefill:
         return 16
