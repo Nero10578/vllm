@@ -907,7 +907,11 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
         )
         self.softmax_scale = self.head_dim**-0.5
-        self.scale_fmt = config.quantization_config["scale_fmt"]
+        self.scale_fmt = (
+            config.quantization_config.get("scale_fmt", "ue8m0")
+            if config.quantization_config is not None
+            else None
+        )
 
         self.rope_parameters = config.rope_scaling
 
