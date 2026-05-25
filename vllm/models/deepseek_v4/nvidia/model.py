@@ -665,7 +665,7 @@ class DeepseekV4MoE(nn.Module):
         # Routing-side tensors live on ``norm_gate`` directly (not on the
         # inner gate); they are initialized to None in NormGatedLinear and
         # populated below depending on the MoE variant.
-        is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
+        is_hash_moe = extract_layer_index(prefix) < getattr(config, "num_hash_layers", 3)
         self.hash_indices_dtype = torch.int64 if self.use_mega_moe else torch.int32
         if is_hash_moe:
             # hash MoE doesn't use e_score_correction_bias
@@ -845,7 +845,8 @@ class DeepseekV4Attention(nn.Module):
         self.q_lora_rank = config.q_lora_rank
         self.o_lora_rank = config.o_lora_rank
         self.head_dim = config.head_dim
-        self.rope_head_dim = config.qk_rope_head_dim
+        self.rope_head_dim = getattr(config, "qk_rope_head_dim",
+            int(config.head_dim * config.partial_rotary_factor))
         self.nope_head_dim = self.head_dim - self.rope_head_dim
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
@@ -913,14 +914,19 @@ class DeepseekV4Attention(nn.Module):
         self.rope_parameters = config.rope_scaling
 
         # Initialize rotary embedding BEFORE DeepseekV4MLAModules (which needs it)
-        rope_parameters = config.rope_parameters
+        # V4 uses nested rope_parameters: {"main": {...}, "compress": {...}}.
+        # Pick the sub-dict matching this layer type and operate on a copy so we
+        # don't mutate the shared config dict.
+        layer_type = config.layer_types[layer_id]
+        rope_type_key = "compress" if layer_type != "sliding_attention" else "main"
+        rope_parameters = config.rope_parameters[rope_type_key].copy()
         rope_parameters["rope_theta"] = (
             config.compress_rope_theta if self.compress_ratio > 1 else config.rope_theta
         )
-        if config.rope_parameters["rope_type"] != "default":
-            config.rope_parameters["rope_type"] = (
+        if rope_parameters.get("rope_type", "default") != "default":
+            rope_parameters["rope_type"] = (
                 "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
+                if rope_parameters.get("apply_yarn_scaling", True)
                 else "deepseek_llama_scaling"
             )
         rope_parameters["mscale"] = 0  # Disable mscale
