@@ -535,8 +535,20 @@ def has_aiter() -> bool:
 
 
 def has_mori() -> bool:
-    """Whether the optional `mori` package is available."""
-    return _has_module("mori")
+    """Whether the optional `mori` package is available and usable.
+
+    MoRI only ships functional ops for gfx942/gfx950 (CDNA). On other ROCm
+    archs (e.g. gfx1201/RDNA4) the wheel may import but expose no `ops`
+    submodule, which would crash MoriPrepareAndFinalize at class-parse time.
+    """
+    if not _has_module("mori"):
+        return False
+    try:
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
+
+        return on_gfx942() or on_gfx950()
+    except Exception:
+        return False
 
 
 def has_fbgemm_gpu() -> bool:
