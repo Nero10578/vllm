@@ -117,10 +117,10 @@ def _constrain_aiter_unified_attn_shared_mem() -> None:
 
     The AITER ``kernel_unified_attention_3d`` Triton kernel ships autotune
     configs tuned for CDNA (MI300X, 256 KB+ shared memory). On gfx12x/RDNA4
-    the per-CU shared-memory limit is 64 KB, and some autotuned configs
-    exceed it, causing ``OutOfResources`` at kernel launch. This prunes
-    configs whose ``num_stages`` would push shared-memory usage past the
-    hardware limit so the autotuner only considers viable candidates.
+    the per-CU shared-memory limit is 64 KB (65536 bytes). Configs with
+    ``num_stages >= 2`` need ~66 KB and crash with ``OutOfResources`` at
+    kernel launch. Filtering to ``num_stages <= 1`` keeps only configs that
+    fit within the 64 KB budget.
     """
     global _aiter_unified_attn_shared_mem_constrained
     if _aiter_unified_attn_shared_mem_constrained:
@@ -133,28 +133,74 @@ def _constrain_aiter_unified_attn_shared_mem() -> None:
         return
 
     try:
-        from aiter.ops.triton.attention.unified_attention import (
-            kernel_unified_attention_3d,
-        )
+        from aiter.ops.triton.attention import unified_attention as _ua_mod
     except ImportError:
         _aiter_unified_attn_shared_mem_constrained = True
         return
 
-    max_shared = 65536
-    original_configs = list(kernel_unified_attention_3d.configs)
-    filtered = []
-    for cfg in original_configs:
-        num_stages = getattr(cfg, "num_stages", 1) or 1
-        if num_stages <= 2:
-            filtered.append(cfg)
-    if len(filtered) < len(original_configs):
-        kernel_unified_attention_3d.configs = filtered
-        logger.info(
-            "Filtered AITER unified-attention autotune configs for gfx12x: "
-            "%d -> %d (num_stages <= 2, %d KB shared-mem limit)",
-            len(original_configs),
-            len(filtered),
-            max_shared // 1024,
+    max_stages = 1
+    patched_count = 0
+
+    # Scan every attribute in the AITER unified_attention module for objects
+    # that carry autotune configs (Autotuner instances, JITFunctions with a
+    # .configs list, etc.). In Triton 3.x the @triton.autotune decorator
+    # may store configs under different attributes depending on version.
+    for name in dir(_ua_mod):
+        obj = getattr(_ua_mod, name, None)
+        if obj is None:
+            continue
+        for attr in ("configs", "pruned_configs"):
+            cfgs = getattr(obj, attr, None)
+            if not cfgs:
+                continue
+            original = list(cfgs)
+            filtered = [
+                cfg for cfg in original
+                if (getattr(cfg, "num_stages", 1) or 1) <= max_stages
+            ]
+            if 0 < len(filtered) < len(original):
+                setattr(obj, attr, filtered)
+                logger.info(
+                    "Filtered AITER %s autotune configs for gfx12x: "
+                    "%d -> %d (num_stages <= %d, 64 KB shared-mem)",
+                    name,
+                    len(original),
+                    len(filtered),
+                    max_stages,
+                )
+                patched_count += 1
+            break
+
+    # Also check the inner .fn of any Autotuner wrappers.
+    kernel = getattr(_ua_mod, "kernel_unified_attention_3d", None)
+    if kernel is not None:
+        inner = getattr(kernel, "fn", None)
+        if inner is not None and inner is not kernel:
+            for attr in ("configs", "pruned_configs"):
+                cfgs = getattr(inner, attr, None)
+                if not cfgs:
+                    continue
+                original = list(cfgs)
+                filtered = [
+                    cfg for cfg in original
+                    if (getattr(cfg, "num_stages", 1) or 1) <= max_stages
+                ]
+                if 0 < len(filtered) < len(original):
+                    setattr(inner, attr, filtered)
+                    logger.info(
+                        "Filtered AITER kernel_unified_attention_3d inner "
+                        "configs for gfx12x: %d -> %d",
+                        len(original),
+                        len(filtered),
+                    )
+                    patched_count += 1
+                break
+
+    if patched_count == 0:
+        logger.warning(
+            "Could not filter AITER unified-attention autotune configs on "
+            "gfx12x. If you hit OutOfResources on shared memory, manually "
+            "clear TRITON_CACHE_DIR and retry."
         )
 
     _aiter_unified_attn_shared_mem_constrained = True
