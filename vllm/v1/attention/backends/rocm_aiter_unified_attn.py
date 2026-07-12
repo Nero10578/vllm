@@ -26,6 +26,56 @@ from vllm.v1.attention.backends.rocm_attn import (
 logger = init_logger(__name__)
 
 
+def _patch_unified_attention_num_stages_for_gfx12x() -> None:
+    """Force num_stages=1 on the AITER unified-attention Triton kernels.
+
+    gfx1201 (RDNA4) has a 64 KiB shared-memory limit. The default autotune
+    configs for kernel_unified_attention_3d select num_stages>=2, which pushes
+    shared memory to 65792 bytes and crashes with OutOfResources. Pinning
+    num_stages=1 keeps every config within the hardware budget.
+    """
+    try:
+        from vllm.platforms.rocm import on_gfx12x
+
+        if not on_gfx12x():
+            return
+    except Exception:
+        return
+
+    try:
+        import aiter.ops.triton.attention.unified_attention as ua_mod
+
+        for attr_name in dir(ua_mod):
+            kernel = getattr(ua_mod, attr_name)
+
+            # Case 1: @triton.autotune — mutate each Config's num_stages.
+            configs = getattr(kernel, "configs", None)
+            if configs:
+                for cfg in configs:
+                    if cfg.kwargs.get("num_stages", 1) != 1:
+                        cfg.kwargs["num_stages"] = 1
+                logger.info_once(
+                    "Patched %s autotune configs num_stages=1 for gfx12x",
+                    attr_name,
+                )
+
+            # Case 2: plain @triton.jit — override the num_stages default so
+            # the launch picks 1 instead of the decorator's value.
+            defaults = getattr(kernel, "defaults", None)
+            if isinstance(defaults, dict) and "num_stages" in defaults:
+                if defaults["num_stages"] != 1:
+                    defaults["num_stages"] = 1
+                    logger.info_once(
+                        "Patched %s jit default num_stages=1 for gfx12x",
+                        attr_name,
+                    )
+    except Exception as e:
+        logger.debug("Failed to patch unified_attention num_stages: %s", e)
+
+
+_patch_unified_attention_num_stages_for_gfx12x()
+
+
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -109,64 +159,6 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         )
 
 
-_aiter_unified_attn_shared_mem_constrained = False
-
-
-def _constrain_aiter_unified_attn_shared_mem() -> None:
-    """Force num_stages=1 on AITER unified-attention kernel for gfx1201.
-
-    The AITER ``kernel_unified_attention_3d`` Triton kernel compiles with
-    ``num_stages=2``, needing 65792 bytes of shared memory — 256 bytes over
-    gfx1201's 64 KB (65536) limit. Forcing ``num_stages=1`` fits within
-    the budget.
-
-    We patch ``triton.runtime.jit.JITFunction.run`` to override
-    ``num_stages=1`` only for ``kernel_unified_attention_3d`` on gfx12x,
-    leaving all other Triton kernels (GDN, MoE, etc.) at their autotuned
-    stage counts.
-    """
-    global _aiter_unified_attn_shared_mem_constrained
-    if _aiter_unified_attn_shared_mem_constrained:
-        return
-
-    from vllm.platforms.rocm import on_gfx12x
-
-    if not on_gfx12x():
-        _aiter_unified_attn_shared_mem_constrained = True
-        return
-
-    try:
-        from aiter.ops.triton.attention.unified_attention import (
-            kernel_unified_attention_3d,
-        )
-    except ImportError:
-        _aiter_unified_attn_shared_mem_constrained = True
-        return
-
-    from triton.runtime.jit import JITFunction
-
-    if getattr(JITFunction.run, "_vllm_gfx12x_stages1", False):
-        _aiter_unified_attn_shared_mem_constrained = True
-        return
-
-    _original_jit_run = JITFunction.run
-    _target_kernel = kernel_unified_attention_3d
-
-    def _jit_run_forced_stages(self, *args, **kwargs):
-        if self is _target_kernel:
-            kwargs["num_stages"] = 1
-        return _original_jit_run(self, *args, **kwargs)
-
-    _jit_run_forced_stages._vllm_gfx12x_stages1 = True
-    JITFunction.run = _jit_run_forced_stages
-    logger.info(
-        "Patched triton JITFunction.run to force num_stages=1 for "
-        "kernel_unified_attention_3d on gfx12x."
-    )
-
-    _aiter_unified_attn_shared_mem_constrained = True
-
-
 class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
@@ -205,7 +197,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         self.unified_attention = unified_attention
         self.supports_quant_query_input = True
-        _constrain_aiter_unified_attn_shared_mem()
 
     def _split_kv_cache(
         self, kv_cache: torch.Tensor

@@ -831,12 +831,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "cross-attention."
             )
 
-        from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
-            _constrain_aiter_unified_attn_shared_mem,
-        )
-
-        _constrain_aiter_unified_attn_shared_mem()
-
     def extend_for_sliding_window(
         self,
         attn_metadata: AiterFlashAttentionMetadata,
