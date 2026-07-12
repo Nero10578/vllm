@@ -109,6 +109,57 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         )
 
 
+_aiter_unified_attn_shared_mem_constrained = False
+
+
+def _constrain_aiter_unified_attn_shared_mem() -> None:
+    """Filter AITER unified-attention autotune configs for gfx12x shared mem.
+
+    The AITER ``kernel_unified_attention_3d`` Triton kernel ships autotune
+    configs tuned for CDNA (MI300X, 256 KB+ shared memory). On gfx12x/RDNA4
+    the per-CU shared-memory limit is 64 KB, and some autotuned configs
+    exceed it, causing ``OutOfResources`` at kernel launch. This prunes
+    configs whose ``num_stages`` would push shared-memory usage past the
+    hardware limit so the autotuner only considers viable candidates.
+    """
+    global _aiter_unified_attn_shared_mem_constrained
+    if _aiter_unified_attn_shared_mem_constrained:
+        return
+
+    from vllm.platforms.rocm import on_gfx12x
+
+    if not on_gfx12x():
+        _aiter_unified_attn_shared_mem_constrained = True
+        return
+
+    try:
+        from aiter.ops.triton.attention.unified_attention import (
+            kernel_unified_attention_3d,
+        )
+    except ImportError:
+        _aiter_unified_attn_shared_mem_constrained = True
+        return
+
+    max_shared = 65536
+    original_configs = list(kernel_unified_attention_3d.configs)
+    filtered = []
+    for cfg in original_configs:
+        num_stages = getattr(cfg, "num_stages", 1) or 1
+        if num_stages <= 2:
+            filtered.append(cfg)
+    if len(filtered) < len(original_configs):
+        kernel_unified_attention_3d.configs = filtered
+        logger.info(
+            "Filtered AITER unified-attention autotune configs for gfx12x: "
+            "%d -> %d (num_stages <= 2, %d KB shared-mem limit)",
+            len(original_configs),
+            len(filtered),
+            max_shared // 1024,
+        )
+
+    _aiter_unified_attn_shared_mem_constrained = True
+
+
 class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
@@ -147,6 +198,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         self.unified_attention = unified_attention
         self.supports_quant_query_input = True
+        _constrain_aiter_unified_attn_shared_mem()
 
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
