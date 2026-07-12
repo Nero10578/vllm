@@ -113,18 +113,17 @@ _aiter_unified_attn_shared_mem_constrained = False
 
 
 def _constrain_aiter_unified_attn_shared_mem() -> None:
-    """Force num_stages=1 on AITER unified-attention kernel for gfx12x.
+    """Force num_stages=1 on AITER unified-attention kernel for gfx1201.
 
-    The AITER ``kernel_unified_attention_3d`` Triton kernel autotunes to
-    ``num_stages=2`` on gfx1201/RDNA4, which needs 65792 bytes of shared
-    memory — 256 bytes over the 64 KB (65536) hardware limit — and crashes
-    with ``OutOfResources`` during CUDA-graph capture. Forcing
-    ``num_stages=1`` at kernel-launch time triggers a recompile that fits
-    within the 64 KB budget.
+    The AITER ``kernel_unified_attention_3d`` Triton kernel compiles with
+    ``num_stages=2``, needing 65792 bytes of shared memory — 256 bytes over
+    gfx1201's 64 KB (65536) limit. Forcing ``num_stages=1`` fits within
+    the budget.
 
-    We wrap the kernel's ``run`` method to inject ``num_stages=1`` into
-    every launch, which is robust against Triton API changes (no dependency
-    on autotuner config internals).
+    We patch ``triton.runtime.jit.JITFunction.run`` to always override
+    ``num_stages=1`` on gfx12x. This is a global patch but only affects
+    gfx12x, where no Triton kernel benefits from >1 stage due to the
+    tight 64 KB LDS budget.
     """
     global _aiter_unified_attn_shared_mem_constrained
     if _aiter_unified_attn_shared_mem_constrained:
@@ -137,31 +136,25 @@ def _constrain_aiter_unified_attn_shared_mem() -> None:
         return
 
     try:
-        from aiter.ops.triton.attention.unified_attention import (
-            kernel_unified_attention_3d,
-        )
+        from triton.runtime.jit import JITFunction
     except ImportError:
         _aiter_unified_attn_shared_mem_constrained = True
         return
 
-    original_run = getattr(kernel_unified_attention_3d, "run", None)
-    if original_run is None or getattr(original_run, "_vllm_gfx12x_stages1", False):
+    if getattr(JITFunction.run, "_vllm_gfx12x_stages1", False):
         _aiter_unified_attn_shared_mem_constrained = True
         return
 
-    import functools
+    _original_jit_run = JITFunction.run
 
-    @functools.wraps(original_run)
-    def _run_with_stages_1(*args, **kwargs):
-        if "num_stages" not in kwargs:
-            kwargs["num_stages"] = 1
-        return original_run(*args, **kwargs)
+    def _jit_run_forced_stages(self, *args, **kwargs):
+        kwargs["num_stages"] = 1
+        return _original_jit_run(self, *args, **kwargs)
 
-    _run_with_stages_1._vllm_gfx12x_stages1 = True
-    kernel_unified_attention_3d.run = _run_with_stages_1
+    _jit_run_forced_stages._vllm_gfx12x_stages1 = True
+    JITFunction.run = _jit_run_forced_stages
     logger.info(
-        "Patched AITER kernel_unified_attention_3d.run to force "
-        "num_stages=1 for gfx12x (64 KB shared-mem limit)."
+        "Patched triton JITFunction.run to force num_stages=1 on gfx12x."
     )
 
     _aiter_unified_attn_shared_mem_constrained = True
