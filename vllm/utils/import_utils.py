@@ -505,6 +505,15 @@ def has_triton_kernels() -> bool:
 @cache
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
+    # TileLang's bundled TVM library aborts during import on gfx12x/RDNA4.
+    # Treat it as unavailable there so ROCm MHC layers use their non-TileLang
+    # fallbacks instead of crashing during model module import.
+    gcn_arch = " ".join(
+        os.environ.get(name, "")
+        for name in ("VLLM_ROCM_GCN_ARCH", "GPU_ARCHS", "PYTORCH_ROCM_ARCH")
+    )
+    if "gfx12" in gcn_arch:
+        return False
     return _has_module("tilelang")
 
 

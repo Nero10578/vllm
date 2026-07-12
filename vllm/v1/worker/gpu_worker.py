@@ -349,9 +349,14 @@ class Worker(WorkerBase):
                         f"({len(assigned_physical_gpu_ids)})"
                     )
             else:
-                assert self.local_rank < torch.accelerator.device_count(), (
+                device_count = (
+                    current_platform.device_count()
+                    if current_platform.is_rocm()
+                    else torch.accelerator.device_count()
+                )
+                assert self.local_rank < device_count, (
                     f"DP adjusted local rank {self.local_rank} is out of "
-                    f"bounds for {torch.accelerator.device_count()} devices."
+                    f"bounds for {device_count} devices."
                 )
 
             visible_device_index = (
