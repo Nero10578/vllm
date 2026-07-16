@@ -53,7 +53,8 @@ from .glm4_moe import (
     Glm4MoeDecoderLayer,
     get_spec_layer_idx_from_weight_name,
 )
-from .utils import maybe_prefix
+from .interfaces import SupportsPP
+from .utils import make_empty_intermediate_tensors_factory, maybe_prefix
 
 
 class SharedHead(nn.Module):
@@ -189,7 +190,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         return logits
 
 
-class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
+class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -213,6 +214,16 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
         self.extract_moe_parameters(example_moe)
+
+        # PP support: the MTP draft runs only on the last PP stage (the runner
+        # gates drafter construction on get_pp_group().is_last_rank), so it
+        # never actually consumes PP intermediate tensors — but SupportsPP
+        # requires this factory.
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], self.config.hidden_size
+            )
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
