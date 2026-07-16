@@ -40,6 +40,9 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantized_draft_embedding import (
+    QuantizedVocabEmbedding,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -53,7 +56,11 @@ from .glm4_moe import (
     Glm4MoeDecoderLayer,
     get_spec_layer_idx_from_weight_name,
 )
-from .utils import maybe_prefix
+from .interfaces import SupportsPP
+from .utils import (
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 
 class SharedHead(nn.Module):
@@ -130,6 +137,21 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+
+        # Design C (standalone draft): when the draft runs with its own
+        # pipeline_parallel_size == 1 (decoupled from a target PP>1), it executes
+        # only on the last global PP rank. There `get_pp_group().is_first_rank`
+        # is False, so a PP-aware forward would wrongly take the inter-stage path
+        # and demand intermediate_tensors the proposer never supplies. This flag
+        # marks the draft as behaving as first==last (embed -> block -> return).
+        # The draft's embed_tokens is already weight-loaded on the last rank and
+        # the target hidden state is resident there, so no cross-stage traffic is
+        # needed.
+        spec_config = vllm_config.speculative_config
+        self.standalone_draft = (
+            spec_config is not None and spec_config.draft_pipeline_parallel_size == 1
+        )
+
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         # to map the exact layer index from weights
@@ -148,11 +170,36 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
                 )
             }
         )
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+        quant_bits = (
+            spec_config.draft_embed_quant_bits if spec_config is not None else None
         )
+        if quant_bits is not None:
+            # A1c: under PP the draft holds its own copy of the (huge) vocab
+            # embedding on the last rank. Quantize it at LOAD time (int storage
+            # allocated here; the checkpoint fp16 weight is quantized as it loads)
+            # so the full fp16 [vocab, hidden] table never materializes on the GPU
+            # — a post-load swap OOMs at the load peak. Correctness is unaffected
+            # (rejection sampling); only the acceptance rate may drop.
+            self.embed_tokens = QuantizedVocabEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                bits=quant_bits,
+                params_dtype=torch.get_default_dtype(),
+            )
+        else:
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+            )
         self.logits_processor = LogitsProcessor(config.vocab_size)
+
+        # Expose a PP intermediate-tensor factory so the wrapper satisfies the
+        # SupportsPP interface. Under standalone_draft (draft_pp == 1) the draft
+        # runs as first==last and never reads/writes IntermediateTensors, but the
+        # SupportsPP guard still requires the attribute to be present.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], config.hidden_size
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -189,12 +236,20 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         return logits
 
 
-class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
+class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.model = Glm4MoeMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        # Expose the inner predictor's PP intermediate-tensor factory so this
+        # wrapper satisfies the SupportsPP interface. Under standalone draft
+        # (draft_pp == 1) the draft runs as first==last on the last rank and never
+        # crosses PP stages, but declaring SupportsPP lets a PP>1 target use
+        # speculative decoding without the draft tripping the SupportsPP guard.
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
         )
 
         # Set MoE hyperparameters
