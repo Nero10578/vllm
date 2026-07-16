@@ -33,7 +33,6 @@ from transformers import PretrainedConfig
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     MoERunner,
     fused_moe_make_expert_params_mapping,
@@ -56,8 +55,6 @@ from .glm4_moe import (
 )
 from .interfaces import SupportsPP
 from .utils import make_empty_intermediate_tensors_factory, maybe_prefix
-
-logger = init_logger(__name__)
 
 
 class SharedHead(nn.Module):
@@ -420,34 +417,6 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts, SupportsPP):
                         weight_loader(param, loaded_weight)
             if not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
-
-        # [DIAG] MTP+PP debug: report which draft weights loaded and embedding stats.
-        emb = dict(self.named_parameters()).get("model.embed_tokens.weight")
-        emb_stat = "MISSING"
-        if emb is not None:
-            emb_stat = (
-                f"shape={tuple(emb.shape)} "
-                f"mean={emb.float().mean().item():.6f} "
-                f"std={emb.float().std().item():.6f} "
-                f"absmax={emb.float().abs().max().item():.6f}"
-            )
-        mtp_layer = self.model.layers.get(str(self.model.mtp_start_layer_idx))
-        mtp_has_eh = (
-            mtp_layer is not None and hasattr(mtp_layer, "eh_proj")
-            and dict(self.named_parameters()).get(
-                f"model.layers.{self.model.mtp_start_layer_idx}.eh_proj.weight"
-            ) is not None
-        )
-        logger.warning(
-            "[MTP+PP DIAG] Glm4MoeMTP loaded %d params. embed_tokens: %s. "
-            "mtp_layer[%s] eh_proj loaded=%s. "
-            "sample loaded names: %s",
-            len(loaded_params),
-            emb_stat,
-            self.model.mtp_start_layer_idx,
-            mtp_has_eh,
-            sorted(loaded_params)[:8],
-        )
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
