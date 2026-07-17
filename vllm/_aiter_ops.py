@@ -66,9 +66,9 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_mi3xx
+        from vllm.platforms.rocm import on_gfx12x, on_mi3xx
 
-        return on_mi3xx()
+        return on_mi3xx() or on_gfx12x()
     return False
 
 
@@ -1655,6 +1655,15 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_enabled(cls) -> bool:
         return cls._AITER_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_sampler_enabled(cls) -> bool:
+        from vllm.platforms.rocm import on_mi3xx
+
+        # AITER's sampler JIT does not support gfx12x/RDNA4, even though
+        # other AITER paths such as unified attention can run there.
+        return cls._AITER_ENABLED and on_mi3xx()
 
     @classmethod
     @if_aiter_supported

@@ -44,19 +44,36 @@ _FUSED_ADD_RMS_NORM_OP = torch.ops.vllm_ir.fused_add_rms_norm.default
 
 # TODO: extend rmsnorm quant kernels to support mixed input/weight dtypes,
 # and remove this check.
+def _node_dtype(node: object) -> torch.dtype | None:
+    if not isinstance(node, fx.Node):
+        return None
+    meta_val = node.meta.get("val")
+    return getattr(meta_val, "dtype", None)
+
+
 def _rms_input_weight_dtype_match(match: pm.Match) -> bool:
-    """Prevent fusion when rms_norm input and weight dtypes differ."""
+    """Prevent fusion when RMSNorm fused kernel dtype constraints are unmet."""
     for node in match.nodes:
         if node.target == _RMS_NORM_OP:
             # rms_norm(x, weight, epsilon, variance_size)
             x, weight = node.args[0], node.args[1]
+            x_dtype = _node_dtype(x)
+            weight_dtype = _node_dtype(weight)
+            if (
+                x_dtype is not None
+                and weight_dtype is not None
+                and x_dtype != weight_dtype
+            ):
+                return False
         elif node.target == _FUSED_ADD_RMS_NORM_OP:
             # fused_add_rms_norm(x, residual, weight, epsilon, variance_size)
-            x, weight = node.args[0], node.args[2]
-        else:
-            continue
-        if isinstance(x, fx.Node) and isinstance(weight, fx.Node):
-            return x.meta["val"].dtype == weight.meta["val"].dtype
+            x, residual, weight = node.args[0], node.args[1], node.args[2]
+            x_dtype = _node_dtype(x)
+            residual_dtype = _node_dtype(residual)
+            weight_dtype = _node_dtype(weight)
+            for dtype in (residual_dtype, weight_dtype):
+                if x_dtype is not None and dtype is not None and x_dtype != dtype:
+                    return False
     return True
 
 

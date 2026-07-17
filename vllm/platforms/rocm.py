@@ -81,6 +81,31 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
 }
 
 
+def _patch_torch_rocm_device_count() -> None:
+    """Fallback when PyTorch's AMDSMI count misses devices visible to HIP."""
+    if not torch.version.hip or not hasattr(torch.cuda, "_device_count_amdsmi"):
+        return
+
+    original_device_count_amdsmi = torch.cuda._device_count_amdsmi
+    if getattr(original_device_count_amdsmi, "_vllm_hip_fallback", False):
+        return
+
+    @wraps(original_device_count_amdsmi)
+    def _device_count_amdsmi_with_hip_fallback() -> int:
+        raw_count = original_device_count_amdsmi()
+        if raw_count == 0:
+            hip_count = torch._C._cuda_getDeviceCount()
+            if hip_count > 0:
+                return hip_count
+        return raw_count
+
+    _device_count_amdsmi_with_hip_fallback._vllm_hip_fallback = True
+    torch.cuda._device_count_amdsmi = _device_count_amdsmi_with_hip_fallback
+
+
+_patch_torch_rocm_device_count()
+
+
 @lru_cache(maxsize=8)
 def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
     """Get number of ROCm devices, caching based on the value of CUDA_VISIBLE_DEVICES
@@ -109,7 +134,10 @@ def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int
         if (hasattr(torch.cuda, "_device_count_amdsmi"))
         else -1
     )
-    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
+    # In some ROCm/PyTorch import orders AMDSMI reports zero handles while the
+    # HIP runtime still enumerates devices. Fall back to the raw runtime count
+    # for both failure and zero-handle cases.
+    r = torch._C._cuda_getDeviceCount() if raw_count <= 0 else raw_count
     return r
 
 
@@ -154,11 +182,17 @@ _sync_hip_cuda_env_vars()
 def with_amdsmi_context(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        initialized = False
         amdsmi_init()
+        initialized = True
         try:
             return fn(*args, **kwargs)
         finally:
-            amdsmi_shut_down()
+            if initialized:
+                try:
+                    amdsmi_shut_down()
+                except AmdSmiException as e:
+                    logger.debug("Failed to shut down amdsmi cleanly: %s", e)
 
     return wrapper
 
@@ -190,11 +224,15 @@ def _get_gcn_arch() -> str:
     Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
     Called once at module level; result stored in _GCN_ARCH.
     """
+    for env_var in ("VLLM_ROCM_GCN_ARCH", "PYTORCH_ROCM_ARCH", "GPU_ARCHS"):
+        if gcn_arch := os.environ.get(env_var):
+            return gcn_arch.replace(",", " ").split()[0]
+
     try:
         return _query_gcn_arch_from_amdsmi()
     except Exception as e:
         logger.debug("Failed to get GCN arch via amdsmi: %s", e)
-        logger.warning_once(
+        logger.warning(
             "Failed to get GCN arch via amdsmi, falling back to torch.cuda. "
             "This will initialize CUDA and may cause "
             "issues if CUDA_VISIBLE_DEVICES is not set yet."
@@ -657,7 +695,7 @@ class RocmPlatform(Platform):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if rocm_aiter_ops.is_enabled() and on_gfx9():
+        if rocm_aiter_ops.is_mha_enabled() and (on_gfx9() or on_gfx12x()):
             logger.info_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
