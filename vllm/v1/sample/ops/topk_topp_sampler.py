@@ -18,11 +18,12 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
-def _skip_aiter_sampler_on_gfx1250() -> bool:
-    # Lazy ROCm-only import; keeps arch detection out of import time on CUDA/CPU.
-    from vllm.platforms.rocm import on_gfx1250
+def _skip_aiter_sampler_on_unsupported_gpu() -> bool:
+    # AITER's sampler JIT does not support gfx1250 or RDNA4 (gfx12x); other
+    # AITER paths such as unified attention do run there.
+    from vllm.platforms.rocm import on_gfx1250, on_gfx12x
 
-    return on_gfx1250()
+    return on_gfx1250() or on_gfx12x()
 
 
 def flashinfer_sampler_supported() -> bool:
@@ -117,7 +118,7 @@ class TopKTopPSampler(nn.Module):
         elif (
             logprobs_mode not in PROCESSED_LOGPROBS_MODES
             and rocm_aiter_ops.is_enabled()
-            and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable
+            and not _skip_aiter_sampler_on_unsupported_gpu()
         ):
             self.aiter_ops = None
             self._aiter_ops_import_failed = False
