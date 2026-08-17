@@ -119,7 +119,23 @@ def rocm_platform_plugin() -> str | None:
                 is_rocm = True
                 logger.debug("Confirmed ROCm platform is available.")
             else:
-                logger.debug("ROCm platform is not available because no GPU is found.")
+                # R9700/gfx1201 (RDNA4): AMDSMI can report zero GPU handles
+                # inside the vLLM process while the HIP runtime still
+                # enumerates all GPUs. Fall back to the PyTorch HIP runtime
+                # before giving up; without this vLLM fails with
+                # "RuntimeError: Failed to infer device type".
+                import torch
+
+                if torch.version.hip and torch._C._cuda_getDeviceCount() > 0:
+                    is_rocm = True
+                    logger.debug(
+                        "Confirmed ROCm platform is available via PyTorch HIP "
+                        "runtime after AMDSMI returned no GPU handles."
+                    )
+                else:
+                    logger.debug(
+                        "ROCm platform is not available because no GPU is found."
+                    )
         finally:
             amdsmi.amdsmi_shut_down()
     except Exception as e:

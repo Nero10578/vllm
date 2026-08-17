@@ -82,6 +82,37 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
 }
 
 
+def _patch_torch_rocm_device_count() -> None:
+    """Fallback when PyTorch's AMDSMI count misses devices visible to HIP.
+
+    On R9700/gfx1201 (RDNA4), AMDSMI can report zero handles while the HIP
+    runtime still enumerates the GPUs, making `torch.cuda.device_count()` return
+    0. Patch `torch.cuda._device_count_amdsmi` so it falls back to the raw HIP
+    device count when the AMDSMI count is zero.
+    """
+    if not torch.version.hip or not hasattr(torch.cuda, "_device_count_amdsmi"):
+        return
+
+    original_device_count_amdsmi = torch.cuda._device_count_amdsmi
+    if getattr(original_device_count_amdsmi, "_vllm_hip_fallback", False):
+        return
+
+    @wraps(original_device_count_amdsmi)
+    def _device_count_amdsmi_with_hip_fallback() -> int:
+        raw_count = original_device_count_amdsmi()
+        if raw_count == 0:
+            hip_count = torch._C._cuda_getDeviceCount()
+            if hip_count > 0:
+                return hip_count
+        return raw_count
+
+    _device_count_amdsmi_with_hip_fallback._vllm_hip_fallback = True
+    torch.cuda._device_count_amdsmi = _device_count_amdsmi_with_hip_fallback
+
+
+_patch_torch_rocm_device_count()
+
+
 @lru_cache(maxsize=8)
 def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
     """Get number of ROCm devices, caching based on the value of CUDA_VISIBLE_DEVICES
@@ -110,7 +141,10 @@ def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int
         if (hasattr(torch.cuda, "_device_count_amdsmi"))
         else -1
     )
-    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
+    # In some ROCm/PyTorch import orders AMDSMI reports zero handles while the
+    # HIP runtime still enumerates devices. Fall back to the raw runtime count
+    # for both failure and zero-handle cases.
+    r = torch._C._cuda_getDeviceCount() if raw_count <= 0 else raw_count
     return r
 
 
@@ -165,11 +199,21 @@ _sync_hip_cuda_env_vars()
 def with_amdsmi_context(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        amdsmi_init()
+        initialized = False
+        try:
+            amdsmi_init()
+            initialized = True
+        except Exception as e:
+            logger.debug("amdsmi_init failed: %s", e)
+            return None
         try:
             return fn(*args, **kwargs)
         finally:
-            amdsmi_shut_down()
+            if initialized:
+                try:
+                    amdsmi_shut_down()
+                except AmdSmiException as e:
+                    logger.debug("Failed to shut down amdsmi cleanly: %s", e)
 
     return wrapper
 
@@ -201,6 +245,12 @@ def _get_gcn_arch() -> str:
     Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
     Called once at module level; result stored in _GCN_ARCH.
     """
+    # Prefer explicit arch env vars; on R9700/gfx1201 AMDSMI can return no
+    # handles and the torch.cuda fallback would initialize CUDA incorrectly.
+    for env_var in ("VLLM_ROCM_GCN_ARCH", "PYTORCH_ROCM_ARCH", "GPU_ARCHS"):
+        if gcn_arch := os.environ.get(env_var):
+            return gcn_arch.replace(",", " ").split()[0]
+
     try:
         return _query_gcn_arch_from_amdsmi()
     except Exception as e:
@@ -822,7 +872,15 @@ class RocmPlatform(Platform):
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = amdsmi_get_processor_handles()[physical_device_id]
+        handles = amdsmi_get_processor_handles()
+        if physical_device_id >= len(handles):
+            logger.warning_once(
+                "AMDSMI returned no handle for device %s; falling back to "
+                "torch.cuda.get_device_name().",
+                device_id,
+            )
+            return torch.cuda.get_device_name(device_id)
+        handle = handles[physical_device_id]
         asic_info = amdsmi_get_gpu_asic_info(handle)
         asic_info_device_id: str = asic_info["device_id"]
         if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
