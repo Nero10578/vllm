@@ -74,6 +74,9 @@ Useful knobs: `RADIANCE_VENV`, `RADIANCE_STACK_MODE=amd-wheel|auto|skip`,
 > (`aiter.ops.triton.attention.unified_attention`, falling back to the old path); (3) aiter's own
 > `flydsl` dependency (skipped by the `--no-deps` aiter build) is installed. `R4D` remains the
 > primary TP2 attention path; `patch_radiance_dispatch`'s aiter `SPLITK` fix also applies on 0.1.23.
+> The runtime attention tune (`RADIANCE_ATTN_TUNE`) is re-ported to 0.1.23's
+> `unified_attention_utils.get_unified_attention_config` with an on/off switch; it is a benchmark
+> candidate, not yet re-qualified (see `BAREMETAL_SETUP.md` section 6).
 
 ## Port status versus vllm-radiance v0.28.0
 

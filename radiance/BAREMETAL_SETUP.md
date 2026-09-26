@@ -313,6 +313,36 @@ The aiter change that matters for GEMM applied regardless: `patch_radiance_dispa
 alignment fix (visible as `# --- radiance fix (patch_radiance_dispatch.py): scale-alignment guard ---`
 in `aiter/ops/triton/utils/gemm_config_utils.py`).
 
+### RADIANCE_ATTN_TUNE (re-ported for aiter >= 0.1.21; benchmark to qualify)
+
+`install_attn_config_hook` wraps AITER's unified-attention config to apply the gfx1201-tuned
+geometry (fp8 decode: `TILE 16`, `stages 1`, `waves 6`, shape-derived split-KV, and a widened
+`BLOCK_M` at head 256 when the verify batch fills a 64-row block; reduce `warps 8`; prefill 2D
+per-dtype tiles). It is a **runtime tune**, not a correctness fix — the LDS clamp above is the
+correctness part.
+
+- **aiter <= 0.1.20** — wraps `select_3d_config` / `select_2d_config`.
+- **aiter >= 0.1.21** — wraps `unified_attention_utils.get_unified_attention_config`, reading the
+  launch's `_UAParams` (`num_tokens`, `num_seqs`, `num_queries_per_kv`, `all_decode`, `max_seqlen_k`)
+  instead of the old frame introspection, and overriding the `kv_split` / `attn_3d` / `reduce` /
+  `attn_2d` configs.
+
+**On/off switch:** `RADIANCE_ATTN_TUNE=0` disables it (default `1`). It is read when the plugin loads
+(per process), so on/off is one env var on the **same build** — a valid A/B control:
+
+- on: `[radiance] attn tuned-config override installed (aiter>=0.1.21 path) on N module aliases`
+- off: `[radiance] attn tune DISABLED (RADIANCE_ATTN_TUNE=0)`
+
+**Status: candidate — needs a matched benchmark.** The constants were fitted on aiter 0.1.20's
+kernel; 0.1.23 rewrote it and changed the defaults, so whether the tune still helps (and by how
+much) is unmeasured. Note the decode tune applies only to **fp8 Q + fp8 KV**; with
+`--kv-cache-dtype bfloat16` only the prefill 2D override is active.
+
+To qualify it: same build, fp8 KV, CUDA graphs on, sweep context × concurrency twice with
+`RADIANCE_ATTN_TUNE=0` and `=1`, and compare output-token throughput (plus TTFT/TPOT). If a shape
+regresses, we keep the switch off or narrow the gate. A split-KV change also alters the reduction
+order, so pair the throughput numbers with a greedy output-equivalence check.
+
 Confirm which state you're in on any install:
 
 ```bash
@@ -383,6 +413,7 @@ site-packages instead of a full rebuild.
 | R4D attention (fp8 KV), GDN, TP2 AR, verify head, dynamic draft | Live and serving (TP2) |
 | `patch_kv_offload_restore` | **Deferred** — upstream rewrote hybrid cache annotation; needs re-qualification |
 | AITER on 0.1.23 | **Qualified on hardware** — SPLITK fix + re-ported LDS clamp applied; vLLM import-path shim (`attention.unified_attention`) and aiter's `flydsl` dep installed; AITER unified attention serving at **TP8** (section 6) |
+| `RADIANCE_ATTN_TUNE` on 0.1.23 | **Candidate** — runtime attention tune re-ported to `unified_attention_utils` with a `RADIANCE_ATTN_TUNE=0/1` switch; needs a matched benchmark (section 6) |
 | Baremetal serving | Validated on R9700: Qwen3.5-27B-FP8 at TP2 (R4D) and TP8 (AITER unified attn) |
 
 This fork is a forward-port of the radiance overlays onto a newer vLLM base; it is not byte-identical

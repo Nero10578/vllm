@@ -189,6 +189,167 @@ def _decode_3d_splits(max_seqlen_k, tile, prgms):
     return max(4, min(_DECODE_3D_MAX_SPLITS, seg, 1 << (tiles - 1).bit_length()))
 
 
+# ---------------------------------------------------------------------------
+# aiter >= 0.1.21: config selection moved to unified_attention_utils. Tuning is a
+# post-processing pass over the config dict returned by get_unified_attention_config,
+# using the launch's _UAParams directly instead of reading unified_attention's frame.
+# ---------------------------------------------------------------------------
+
+
+def _geo_from_params(params):
+    """(num_tokens, num_seqs, num_queries_per_kv, num_kv_heads, all_decode), or None."""
+    try:
+        return (
+            int(params.num_tokens),
+            int(params.num_seqs),
+            int(params.num_queries_per_kv),
+            int(params.num_kv_heads),
+            bool(params.all_decode),
+        )
+    except Exception:
+        return None
+
+
+def _apply_attn_tune_new(op, params, c, logged):
+    """Gfx1201 tune over the new get_unified_attention_config result for one op.
+
+    Same intent as the legacy select_3d_config/select_2d_config override: fp8 decode
+    gets TILE=16 / stages=1 / the shape-derived split count and, at head 256 when the
+    verify batch fills a 64-row block, a widened BLOCK_M; prefill 2D gets the per-dtype
+    tile. Only plain (non-shuffled) triton configs are touched.
+    """
+    head_size = int(getattr(params, "head_size", 0) or 0)
+    q_dtype = getattr(params, "q_dtype", None)
+    kv_dtype = getattr(params, "kv_cache_dtype", None)
+    fp8 = q_dtype == torch.float8_e4m3fn
+    fp8_kv = kv_dtype == torch.float8_e4m3fn
+    two_byte = kv_dtype in (torch.bfloat16, torch.float16)
+
+    if op == "kv_split":  # 3D decode: the caller takes TILE_SIZE and NUM_SEGMENTS from here
+        if fp8 and fp8_kv:
+            c["TILE_SIZE"] = 16
+            geo = _geo_from_params(params)
+            if geo is not None and not geo[4]:
+                ntok, nseq, nqpkv, kvh, _ = geo
+                block_m = _decode_3d_block_m(geo, head_size)
+                prgms = int(getattr(params, "num_2d_prgms", 1) or 1)
+                tile = 16
+                if block_m is not None:
+                    tile = 32
+                    prgms = (ntok // max(1, block_m // nqpkv) + nseq) * kvh
+                c["TILE_SIZE"] = tile
+                c["NUM_SEGMENTS"] = _decode_3d_splits(
+                    int(getattr(params, "max_seqlen_k", 0) or 0), tile, prgms
+                )
+                if not logged[0]:
+                    logged[0] = True
+                    sys.stderr.write(
+                        f"[radiance] decode 3D geometry (aiter>=0.1.21): "
+                        f"BLOCK_M={block_m or 'stock'} TILE={tile} splits={c['NUM_SEGMENTS']} "
+                        f"seqs={nseq} tokens={ntok} kv={getattr(params, 'max_seqlen_k', 0)}\n")
+                    sys.stderr.flush()
+        return c
+
+    if op == "attn_3d":  # decode kernel launch config
+        if fp8 and fp8_kv:
+            c["num_warps"] = 4
+            c["num_stages"] = 1
+            c["waves_per_eu"] = 6
+            geo = _geo_from_params(params)
+            if geo is not None and not geo[4] and head_size == _DECODE_3D_HEAD:
+                c["num_warps"] = 2
+                block_m = _decode_3d_block_m(geo, head_size)
+                if block_m is not None:
+                    c["num_warps"] = 4
+                    c["BLOCK_M"] = block_m
+                    c["BLOCK_Q"] = max(1, block_m // max(1, geo[2]))
+        return c
+
+    if op == "reduce":
+        if fp8 and fp8_kv:
+            c["num_warps"] = 8
+            c["num_stages"] = 1
+            c["waves_per_eu"] = 2
+        return c
+
+    if op == "attn_2d":  # prefill / MTP decode-via-2D
+        if two_byte:
+            c["TILE_SIZE"] = 16
+            c["num_warps"] = 4
+            c["num_stages"] = 1
+            c["waves_per_eu"] = 1
+        elif int(getattr(params, "max_seqlen_q", 0) or 0) >= 256:
+            c["TILE_SIZE"] = 16
+            c["waves_per_eu"] = 1
+            tuned = _PREFILL_2D_BY_HEAD.get(head_size)
+            if tuned is not None:
+                c.update(tuned)
+                c["BLOCK_Q"] = max(
+                    1, c["BLOCK_M"] // max(1, int(getattr(params, "num_queries_per_kv", 1) or 1))
+                )
+        return c
+
+    return c
+
+
+def _install_attn_config_hook_new():
+    """Install the tune over unified_attention_utils.get_unified_attention_config.
+
+    Returns True when the aiter >= 0.1.21 layout is present and the hook was installed.
+    The callers (unified_attention's triton wrappers) resolve get_unified_attention_config
+    as a module global, so the reference is patched on each loaded module that has it.
+    """
+    try:
+        import aiter.ops.triton.utils.unified_attention_utils as UAU
+    except Exception:
+        return False
+    if not hasattr(UAU, "get_unified_attention_config"):
+        return False
+
+    targets = []
+    for name in ("aiter.ops.triton.attention.unified_attention",
+                 "aiter.ops.triton.unified_attention"):
+        try:
+            targets.append(__import__(name, fromlist=["get_unified_attention_config"]))
+        except Exception:
+            continue
+    for mod in list(sys.modules.values()):
+        if mod is not None and getattr(mod, "__name__", "").endswith("unified_attention") \
+                and hasattr(mod, "get_unified_attention_config") and mod not in targets:
+            targets.append(mod)
+
+    logged = [False]
+
+    def _wrap(orig):
+        def _cfg(op, params, backend="triton", arch=None):
+            c = orig(op, params, backend=backend, arch=arch)
+            if backend != "triton":
+                return c
+            try:
+                return _apply_attn_tune_new(op, params, c, logged)
+            except Exception:
+                return c
+        return _cfg
+
+    patched = 0
+    for mod in targets:
+        if getattr(mod, "_radiance_attn_tuned", False):
+            continue
+        orig = getattr(mod, "get_unified_attention_config", None)
+        if orig is None:
+            continue
+        mod.get_unified_attention_config = _wrap(orig)
+        mod._radiance_attn_tuned = True
+        patched += 1
+    if not patched:
+        return False
+    sys.stderr.write(
+        f"[radiance] attn tuned-config override installed (aiter>=0.1.21 path) on "
+        f"{patched} module alias{'es' if patched != 1 else ''}\n")
+    sys.stderr.flush()
+    return True
+
+
 def install_attn_config_hook():
     """Override AITER's unified-attention config with the gfx1201-tuned one, per dtype, phase and
     head size:
@@ -198,7 +359,17 @@ def install_attn_config_hook():
        prefill 2D fp8  TILE=16 waves1  (large prefill only) + the per-head-size table above
        prefill 2D bf16 TILE=16 warps4 stages1 waves1
     Purely a tune: every LDS-fit (correctness) clamp lives in patch_unified_attention_lds.py
-    instead, so this cannot make a model fail to start."""
+    instead, so this cannot make a model fail to start.
+
+    RADIANCE_ATTN_TUNE=0 disables this tune entirely (same code path, so it is a valid
+    control for benchmarking)."""
+    if os.environ.get("RADIANCE_ATTN_TUNE", "1") != "1":
+        sys.stderr.write("[radiance] attn tune DISABLED (RADIANCE_ATTN_TUNE=0)\n")
+        sys.stderr.flush()
+        return
+    # aiter >= 0.1.21 moved config selection to unified_attention_utils; wrap that instead.
+    if _install_attn_config_hook_new():
+        return
     try:
         import aiter.ops.triton.attention.unified_attention as UA
     except Exception:
