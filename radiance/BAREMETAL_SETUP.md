@@ -314,7 +314,9 @@ them if you see them, or if you're on an older checkout.
 | 7 | `RADIANCE_SKIP_FORK=1` ignored; vLLM rebuilt anyway | Ran an old checkout | `git pull --ff-only`; verify `grep -c RADIANCE_SKIP_FORK radiance/bootstrap.sh` ≥ 1 |
 | 8 | Smoke test `module 'vllm' has no attribute '__version__'` | Script bug (fork may not expose it) | Smoke now uses `importlib.metadata.version("vllm")` |
 | 9 | `patch_radiance_dispatch` reported the vLLM hunk missing | Editable install has no `site-packages/vllm`; the hunk is already baked in source | Treated as NOOP for editable installs |
-| 10 | `patch_unified_attention_lds` reported `FAIL … missing` or drift | aiter absent, or aiter ≥0.1.21 rewrote the file | Skips cleanly; see section 6 |
+| 10 | `patch_unified_attention_lds` reported `FAIL … missing` or drift | aiter absent, or aiter ≥0.1.21 rewrote the file | Skips cleanly, or applies the new-layout clamp; see section 6 |
+| 11 | `ModuleNotFoundError: No module named 'aiter.ops.triton.unified_attention'` | aiter ≥0.1.21 moved the module under `attention/`; vLLM's backend imported only the old path | vLLM now tries `aiter.ops.triton.attention.unified_attention` first, falls back to the old path |
+| 12 | `ModuleNotFoundError: No module named 'flydsl'` (from `aiter/ops/topk_select.py`) | aiter installed `--no-deps`, so aiter 0.1.23's own dependency `flydsl` was missing | bootstrap now installs aiter's runtime deps (`flydsl`, pandas, psutil, matplotlib, pyyaml, einops, pybind11, ninja) |
 
 ### Why the wheel install, not editable
 

@@ -220,8 +220,16 @@ if [ "${RADIANCE_INSTALL_AITER:-0}" = "1" ]; then
         uv pip install --python "$PY" --no-build-isolation --no-deps . )
     rm -rf "$AW"
   fi
+  # aiter is installed with --no-deps (so it cannot replace torch/triton), but aiter >= 0.1.21
+  # needs its own Python deps — notably `flydsl`, which aiter/__init__.py imports via
+  # topk_select. Install them explicitly; unpinned so already-satisfied ones are left alone.
+  AITER_FLYDSL="${RADIANCE_FLYDSL_SPEC:-flydsl==0.3.4.1}"
+  uv pip install --python "$PY" pandas psutil matplotlib pyyaml einops pybind11 ninja \
+    "$AITER_FLYDSL" \
+    || warn "installing aiter runtime deps failed; aiter import may fail until they are present"
   "$PY" -c 'import importlib.metadata as m; print("aiter", m.version("amd-aiter"))' \
     || warn "aiter version check failed"
+  "$PY" -c 'import flydsl; print("flydsl OK")' || warn "flydsl import failed"
 else
   log "AITER skipped (set RADIANCE_INSTALL_AITER=1 for the AITER fallback backends/GEMM)"
 fi
