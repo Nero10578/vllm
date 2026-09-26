@@ -540,10 +540,11 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
 
         c = self.config
         w_q, w_s, w_zp = self._get_weight_params(layer)
-        # Symmetric (uint4b8) layers carry a stale checkpoint-format qzeros
-        # tensor that process_weights_after_loading leaves untouched. The
-        # kernels dequantize those with the constant bias instead.
-        if not c.zero_points:
+        # Types with a built-in zero bias (e.g. uint4b8) carry a stale
+        # checkpoint-format qzeros tensor that process_weights_after_loading
+        # leaves untouched. Ignore it and use the scalar bias instead, as the
+        # CUDA TritonW4A16 kernel does.
+        if c.weight_type.has_bias():
             w_zp = None
 
         x_2d = x.reshape(-1, x.shape[-1])
