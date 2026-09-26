@@ -42,7 +42,7 @@ out-of-tree patches.
 Useful knobs: `RADIANCE_VENV`, `RADIANCE_STACK_MODE=amd-wheel|auto|skip`,
 `RADIANCE_ROCM_ROOT` (defaults to `/opt/rocm/core-10.0` when present), `RADIANCE_TORCH_BACKEND`,
 `RADIANCE_INSTALL_MODE=editable|wheel`, `RADIANCE_INSTALL_AITER=1` (+ `RADIANCE_AITER_VERSION`,
-`RADIANCE_AITER_COMMIT`), `RADIANCE_R4D_DIR`,
+`RADIANCE_AITER_COMMIT`, `RADIANCE_AITER_SPEC`), `RADIANCE_R4D_DIR`,
 `RADIANCE_SKIP_{DEPS,R4D,HIPEXT,PATCHES,CONFIGS,LLVM_LINK,SMOKE}=1`.
 
 > `amd-wheel` mode uninstalls `amd-quark`, matching the manual guide. The radiance Quark paths
@@ -50,13 +50,16 @@ Useful knobs: `RADIANCE_VENV`, `RADIANCE_STACK_MODE=amd-wheel|auto|skip`,
 > checkpoints are unaffected.
 >
 > **AITER is not installed by default.** It is not a vLLM dependency (the fork guards its import),
-> and the R4D path does not need it. Set `RADIANCE_INSTALL_AITER=1` to build AITER for gfx1201
-> (pinned to the image's `AITER_COMMIT`, overridable via `RADIANCE_AITER_{VERSION,COMMIT}`) — it
+> and the R4D path does not need it. Set `RADIANCE_INSTALL_AITER=1` to build AITER for gfx1201 — it
 > provides the `ROCM_AITER_UNIFIED_ATTN` fallback backend, the preshuffle FP8 blockscale GEMM
 > (`RADIANCE_PRESHUFFLE`), the GDN AITER knobs, and the targets of `patch_unified_attention_lds`
-> plus `patch_radiance_dispatch`'s `SPLITK` hunk. The image's AITER pin targets torch 2.12 / ROCm
-> 7.14, so on torch 2.13 / ROCm 10 it may need a newer commit. When AITER is absent, that out-of-tree
-> patch and the MXFP4 tile copy skip with a warning.
+> plus `patch_radiance_dispatch`'s `SPLITK` hunk. No `amd-aiter` wheel is published (the AMD
+> whl-next index and PyPI both lack it), so this is a source build. The qualified image pinned
+> **0.1.20** (`fc2e5d57`) for torch 2.12 / ROCm 7.14; because this host is torch 2.13 / ROCm 10, the
+> bootstrap defaults to the current tag **0.1.23** (`50da036a`). Override with
+> `RADIANCE_AITER_VERSION` / `RADIANCE_AITER_COMMIT` / `RADIANCE_AITER_SPEC`. Changing the AITER
+> version changes the AITER-backed tuning paths, so treat it as a re-qualification. When AITER is
+> absent, the aiter out-of-tree patch and the MXFP4 tile copy skip with a warning.
 
 ## Port status versus vllm-radiance v0.28.0
 

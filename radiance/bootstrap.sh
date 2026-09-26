@@ -163,19 +163,29 @@ fi
 # hunk. Opt in with RADIANCE_INSTALL_AITER=1.
 if [ "${RADIANCE_INSTALL_AITER:-0}" = "1" ]; then
   log "AITER (gfx1201, source build; kernels JIT at runtime)"
-  AITER_VERSION="${RADIANCE_AITER_VERSION:-0.1.20}"
-  AITER_COMMIT="${RADIANCE_AITER_COMMIT:-fc2e5d57fb5b8ad8e7e23f7103071dde798ea618}"
-  # Try a published wheel first (fast path); fall back to the pinned source build.
-  if uv pip install --python "$PY" "amd-aiter==${AITER_VERSION}" 2>/dev/null; then
-    echo "installed amd-aiter==${AITER_VERSION} from the index"
+  # The qualified image pinned AITER 0.1.20 (fc2e5d57) for torch 2.12 / ROCm 7.14. This
+  # host is torch 2.13 / ROCm 10, so default to the current ROCm/aiter tag and let the
+  # operator override. Changing the AITER version changes the AITER-backed tuning paths
+  # (preshuffle FP8 GEMM, unified attention, GDN knobs), so treat it as a re-qualification.
+  AITER_VERSION="${RADIANCE_AITER_VERSION:-0.1.23}"
+  AITER_COMMIT="${RADIANCE_AITER_COMMIT:-50da036acdedec2dd596f93188d6c615e2561672}"
+  AITER_SPEC="${RADIANCE_AITER_SPEC:-}"
+  # No amd-aiter wheel is published on the AMD whl-next index or PyPI (verified against
+  # https://stable.repo.amd.com/rocm/whl-next/), so the index paths are best-effort and the
+  # source build below is the real path.
+  if [ -n "$AITER_SPEC" ] && uv pip install --python "$PY" "$AITER_SPEC" 2>/dev/null; then
+    echo "installed $AITER_SPEC"
+  elif uv pip install --python "$PY" --index-url "$ROCM_WHEEL_INDEX" \
+        --extra-index-url https://pypi.org/simple "amd-aiter==${AITER_VERSION}" 2>/dev/null; then
+    echo "installed amd-aiter==${AITER_VERSION} from an index"
   else
-    warn "no amd-aiter wheel for this platform/version; building from ROCm/aiter @ ${AITER_COMMIT:0:12}"
-    warn "note: the image's AITER pin targets torch 2.12/ROCm 7.14; on torch 2.13/ROCm 10 this"
-    warn "commit may need bumping (set RADIANCE_AITER_COMMIT to a torch-2.13-compatible commit)."
+    warn "no amd-aiter wheel found; building from ROCm/aiter @ ${AITER_COMMIT:0:12} (v${AITER_VERSION})"
     AW="$(mktemp -d)"
     git clone --filter=blob:none --no-checkout https://github.com/ROCm/aiter.git "$AW/aiter"
-    git -C "$AW/aiter" fetch --depth 1 origin "$AITER_COMMIT" || true
-    git -C "$AW/aiter" checkout --detach "$AITER_COMMIT"
+    git -C "$AW/aiter" fetch --depth 1 origin tag "v${AITER_VERSION}" || \
+      git -C "$AW/aiter" fetch --depth 1 origin "$AITER_COMMIT" || true
+    git -C "$AW/aiter" checkout --detach "$AITER_COMMIT" || die "aiter commit $AITER_COMMIT not found"
+    [ "$(git -C "$AW/aiter" rev-parse HEAD)" = "$AITER_COMMIT" ] || die "aiter checkout mismatch"
     ( cd "$AW/aiter" && GPU_ARCHS="$GFX_ARCH" PREBUILD_KERNELS=0 AITER_USE_SYSTEM_TRITON=1 \
         SETUPTOOLS_SCM_PRETEND_VERSION="$AITER_VERSION" \
         uv pip install --python "$PY" --no-build-isolation --no-deps . )
