@@ -244,52 +244,57 @@ Facts:
 - The qualified image used AITER **0.1.20**; we default to 0.1.23 because 0.1.20 predates
   torch 2.13 / ROCm 10.
 
-### The unsolved part: the RDNA LDS-fit overlay
+### The RDNA LDS-fit overlay (re-ported for aiter >= 0.1.21)
 
 The image carried `patch_unified_attention_lds.py`, a **correctness** fix that shrinks AITER's
 staged K/V tile to fit the R9700's 64 KiB LDS (AITER sizes it for CDNA's much larger LDS). Without
-it, AITER's unified-attention backend can raise Triton `OutOfResources` at CUDA-graph capture for
-head_size 256 (2-byte KV) and 512 (fp8 KV).
+it, AITER's unified-attention backend can raise Triton `OutOfResources` at CUDA-graph capture:
+
+```
+head_size 256, 2-byte KV (bf16/fp16): 64*256*2*2 + 256 = 65792
+head_size 512, fp8 KV              : 64*512*1*2 + 256 = 65792
+```
 
 aiter **0.1.21+ rewrote `unified_attention.py`**: `select_3d_config` / `select_2d_config` were
-removed, and config selection moved to
-`aiter/ops/triton/utils/unified_attention_utils.py` (`get_unified_attention_config` →
-`compute_tile_params` / `compute_segment_params`), with a new schema. The radiance overlay anchors
-to the old functions, so on 0.1.23 it **cannot apply**. Bootstrap now detects this and prints an
-`N/A` note instead of a drift `FAIL`:
+removed and config selection moved to `unified_attention_utils.get_unified_attention_config`
+(`compute_tile_params` / `compute_segment_params`), so the original overlay's anchors no longer
+exist. `patch_unified_attention_lds.py` now handles **both** layouts:
 
-```
-N/A   aiter >= 0.1.21 moved unified-attention config selection to
-      unified_attention_utils; the RDNA LDS-fit overlay is not re-ported.
-      AITER unified attention is unqualified on this aiter version; R4D attention is unaffected.
-```
+- **aiter <= 0.1.20** — edits `select_3d_config` / `select_2d_config` as before.
+- **aiter >= 0.1.21** — injects a `_radiance_fit_lds` helper into `unified_attention.py` and clamps
+  the staged tile (pipeline depth first, then tile width) in `_unified_attention_2d_triton` and
+  `_unified_attention_3d_triton`, where both the tile and the stage count are in scope. The clamp is
+  guarded to `gfx12` and skipped for shuffled/registered caches (their tile must equal the page).
 
-**Consequences and options:**
+**Status:** the >= 0.1.21 path was validated against the real v0.1.23 source (anchors match, AST
+parses, idempotent) but has **not run on hardware**. When you switch to AITER attention, watch for a
+Triton `OutOfResources` at CUDA-graph capture or a wrong-result; the knob to tune if it appears is
+the clamp budget (currently 64 KiB) or the gfx1201 `TILE_SIZE_MIN/MAX` in the aiter config.
 
-- **Current setup is unaffected** — attention is R4D, not AITER, so the missing overlay never runs.
-  The aiter change that *did* apply on 0.1.23 is `patch_radiance_dispatch`'s `SPLITK` alignment fix
-  (visible as `# --- radiance fix (patch_radiance_dispatch.py): scale-alignment guard ---` in
-  `aiter/ops/triton/utils/gemm_config_utils.py`).
-- **If you need AITER unified attention** (e.g. the head-512 Gemma MTP drafter, which flash-attn
-  can't serve), you have three choices:
-  1. **Re-port the LDS clamp** to 0.1.23's API — clamp `TILE_SIZE` (and `num_stages`) in
-     `get_unified_attention_config` so `TILE_SIZE * next_pow2(head_size) * elem_size * num_stages
-     + 256 <= 65536`. Real code work, needs the aiter config JSON schema and hardware validation.
-  2. **Pin aiter 0.1.20** (`RADIANCE_AITER_COMMIT=fc2e5d57…`, `RADIANCE_AITER_VERSION=0.1.20`) so the
-     overlay applies as written — risk: may not build against torch 2.13 / ROCm 10.
-  3. **Keep using R4D** and treat the AITER unified-attention backend as unqualified on 0.1.23.
-     This is the recommended default today.
+**Options:**
+
+1. **Keep using R4D** (default tuned path) — the overlay is dormant and irrelevant.
+2. **Use AITER unified attention on 0.1.23** — the re-ported clamp is installed by bootstrap; enable
+   `VLLM_ROCM_USE_AITER*` (below) and `--attention-backend=ROCM_AITER_UNIFIED_ATTN`, then validate.
+   This is what you need to run a geometry R4D can't (e.g. TP8's `gqa=3`, or the head-512 Gemma
+   drafter).
+3. **Pin aiter 0.1.20** (the qualified image version) so the old-layout overlay applies as written —
+   risk: may not build against torch 2.13 / ROCm 10.
+
+The aiter change that matters for GEMM applied regardless: `patch_radiance_dispatch`'s `SPLITK`
+alignment fix (visible as `# --- radiance fix (patch_radiance_dispatch.py): scale-alignment guard ---`
+in `aiter/ops/triton/utils/gemm_config_utils.py`).
 
 Confirm which state you're in on any install:
 
 ```bash
 cd ~/vllm-radiance/.venv/lib/python3.12/site-packages
-grep -n "radiance" aiter/ops/triton/utils/gemm_config_utils.py   # SPLITK fix → expected
-grep -n "RADIANCE" aiter/ops/triton/attention/unified_attention.py  # LDS fix → expected empty on >=0.1.21
+grep -n "radiance" aiter/ops/triton/utils/gemm_config_utils.py            # SPLITK fix → expected
+grep -n "_radiance_fit_lds" aiter/ops/triton/attention/unified_attention.py  # LDS fit → expected (>=0.1.21)
 ```
 
-To use AITER attention (once qualified), uncomment the `VLLM_ROCM_USE_AITER*` exports in
-`radiance/radiance-env.sh` and pass `--attention-backend=ROCM_AITER_UNIFIED_ATTN`.
+To use AITER attention, uncomment the `VLLM_ROCM_USE_AITER*` exports in `radiance/radiance-env.sh`
+and pass `--attention-backend=ROCM_AITER_UNIFIED_ATTN`.
 
 ---
 
@@ -347,7 +352,7 @@ site-packages instead of a full rebuild.
 | Tuned FP8/MoE/MXFP4 configs | Installed and selected at runtime |
 | R4D attention (fp8 KV), GDN, TP2 AR, verify head, dynamic draft | Live and serving |
 | `patch_kv_offload_restore` | **Deferred** — upstream rewrote hybrid cache annotation; needs re-qualification |
-| AITER on 0.1.23 | **Partially qualified** — SPLITK fix applies; LDS-fit overlay N/A (section 6); AITER unified attention unqualified |
+| AITER on 0.1.23 | **Partially qualified** — SPLITK fix applies; LDS-fit overlay re-ported for >= 0.1.21 (source-validated, hardware validation pending); AITER unified attention usable but unproven (section 6) |
 | Baremetal serving | Validated on dual R9700 (Qwen3.5-27B-FP8, TP2, FP8 KV) |
 
 This fork is a forward-port of the radiance overlays onto a newer vLLM base; it is not byte-identical

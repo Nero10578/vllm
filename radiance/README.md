@@ -64,12 +64,14 @@ Useful knobs: `RADIANCE_VENV`, `RADIANCE_STACK_MODE=amd-wheel|auto|skip`,
 > version changes the AITER-backed tuning paths, so treat it as a re-qualification. When AITER is
 > absent, the aiter out-of-tree patch and the MXFP4 tile copy skip with a warning.
 >
-> **aiter version gap:** aiter >= 0.1.21 rewrote `unified_attention.py` and moved config
-> selection to `unified_attention_utils.get_unified_attention_config`, so
-> `patch_unified_attention_lds` (the RDNA 64 KiB LDS-fit overlay, a correctness fix) cannot apply
-> and is skipped with an `N/A` note. Consequence: the **AITER unified-attention backend is
-> unqualified** on aiter >= 0.1.21 — use R4D attention (the default tuned path) or pin aiter 0.1.20.
-> `patch_radiance_dispatch`'s aiter `SPLITK` fix still applies on 0.1.23.
+> **aiter version note:** aiter >= 0.1.21 rewrote `unified_attention.py` and moved config selection to
+> `unified_attention_utils.get_unified_attention_config`. `patch_unified_attention_lds` now handles
+> **both** layouts: for <= 0.1.20 it edits the old selectors, and for >= 0.1.21 it injects a
+> `_radiance_fit_lds` helper and clamps the staged tile in `_unified_attention_2d_triton` /
+> `_unified_attention_3d_triton`. The >= 0.1.21 path was validated against the v0.1.23 source
+> (anchors + AST) but has **not** been exercised on hardware yet — the failure mode it prevents is a
+> Triton `OutOfResources` at CUDA-graph capture for head_size 256 (2-byte KV) / 512 (fp8). `R4D` is
+> still the primary attention path; `patch_radiance_dispatch`'s aiter `SPLITK` fix applies on 0.1.23.
 
 ## Port status versus vllm-radiance v0.28.0
 

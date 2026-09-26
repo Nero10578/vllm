@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""Build-time source patch for AITER's unified attention on RDNA (gfx1201 / R9700). Three idempotent
-string replacements on the installed site-packages copy of unified_attention.py.
+"""LDS-fit overlay for AITER's unified attention on RDNA (gfx1201 / R9700).
 
-1. LDS fit (correctness, unconditional, both config selectors). The attention kernels stage a
-   TILE_SIZE x next_pow2(head_size) K/V tile num_stages deep in shared memory, at the KV cache element
-   size, plus ~256 B. AITER sizes that tile for CDNA's much larger LDS; the R9700 has 64 KiB, so
-   several of its own picks do not fit and Triton raises OutOfResources at cudagraph capture:
-     head_size 256, 2-byte KV : 64*256*2*2 + 256 = 65792
-     head_size 512, fp8    KV : 64*512*1*2 + 256 = 65792   (Gemma4's global-attention layers)
-   Both selectors now step num_stages, then TILE_SIZE, down until the tile fits. This is a hard
-   requirement, not a preference, so it lives in source and applies whether or not the runtime
-   RADIANCE_ATTN_TUNE hook is installed (that hook is a tune and must stay disableable).
+The attention kernels stage a TILE_SIZE x next_pow2(head_size) K/V tile num_stages deep in shared
+memory at the KV-cache element size (+~256 B). AITER's gfx1201 config lets TILE_SIZE reach 64 with
+2 pipeline stages, which exceeds the R9700's 64 KiB LDS for some shapes and makes Triton raise
+OutOfResources at cudagraph capture:
 
-2. bf16/fp16 (2-byte, incl. --kv-cache-dtype auto) 3D-decode tune. do_bench-optimal at head_size 256:
-   TILE 16, warps 4, stages 2, waves 2, reduce warps 4 (warps=4 is the lever: +14% decode, 4-7x
-   prefill). This must be a source patch rather than the RADIANCE_ATTN_TUNE wrapper because that
-   wrapper is bypassed for the bf16 3D path in-serve.
+    head_size 256, 2-byte KV (bf16/fp16): 64*256*2*2 + 256 = 65792
+    head_size 512, fp8 KV              : 64*512*1*2 + 256 = 65792
+
+This patch clamps the staged tile (pipeline depth first, then tile width) until it fits 64 KiB, at
+whichever launch site the installed aiter uses:
+
+  * aiter <= 0.1.20: string replacements on the `select_3d_config` / `select_2d_config` selectors.
+  * aiter >= 0.1.21: the selectors were replaced by `unified_attention_utils.get_unified_attention_config`;
+    here we inject a `_radiance_fit_lds` helper and clamp in `_unified_attention_2d_triton` and
+    `_unified_attention_3d_triton` (where both the tile and the stage count are in scope).
+
+The clamp is a hard requirement (correctness), so it lives in source; the runtime RADIANCE_ATTN_TUNE
+hook stays a separate, disableable tune. Registered/chunked/shuffled caches are left untouched (their
+tile must equal the page).
 """
 import sysconfig
 from pathlib import Path
@@ -25,9 +29,12 @@ from _patchlib import apply
 SP = Path(sysconfig.get_paths()["purelib"])
 F = SP / "aiter/ops/triton/attention/unified_attention.py"
 
+# ---------------------------------------------------------------------------
+# Old layout (aiter <= 0.1.20): edit the selector functions directly.
+# ---------------------------------------------------------------------------
+
 
 def _fit(tag, stages_var):
-    """Clamp source for one selector: shrink pipeline depth first, then the tile."""
     return (
         f"    # --- RADIANCE LDS fit ({tag}): shrink the staged K/V tile into the R9700's 64 KiB LDS ---\n"
         "    _rad_el = 2 if kv_cache_dtype in (torch.bfloat16, torch.float16) else 1\n"
@@ -40,22 +47,15 @@ def _fit(tag, stages_var):
     )
 
 
-# 1a. select_3d_config. Inserted before the gather-mode block so that block's
-# `NUM_BLOCKS_GATHER_PER_TILE = TILE_SIZE // block_size` is recomputed from the clamped tile.
 A3 = (
     "    if NUM_BLOCKS_GATHER_PER_TILE > 1:\n"
     "        # force gather mode\n"
 )
-
-# 1b. select_2d_config returns its config dict directly; nothing downstream depends on the tile.
 A2 = (
     "    return {\n"
     '        "BLOCK_M": BLOCK_M,\n'
     '        "BLOCK_Q": BLOCK_Q,\n'
 )
-
-# 2. The 8/12-space indent uniquely targets select_3d_config's RDNA branch (select_2d_config's
-# identical elif is at 4/8-space, so it is not matched; do NOT rely on replace-count alone).
 ANCHOR = (
     "        elif q_dtype == e4m3_dtype and kv_cache_dtype == e4m3_dtype:\n"
     "            TILE_SIZE = max(32, TILE_SIZE)\n"
@@ -63,8 +63,6 @@ ANCHOR = (
 INSERT = (
     "        elif kv_cache_dtype in (torch.bfloat16, torch.float16):\n"
     "            # --- RADIANCE 2-byte (bf16/fp16, incl. --kv-cache-dtype auto) KV, gfx1201 ---\n"
-    "            # do_bench-optimal at head_size 256: TILE16 warps4 stages2 waves2 (warps4 = +14%\n"
-    "            # decode, 4-7x prefill), reduce warps4. The LDS fit above keeps this in bounds.\n"
     "            TILE_SIZE = 16\n"
     "            attn_warps = 4\n"
     "            attn_stages = 2\n"
@@ -72,27 +70,109 @@ INSERT = (
     "            reduce_num_warps = 4\n"
 )
 
+# ---------------------------------------------------------------------------
+# New layout (aiter >= 0.1.21): inject the helper and clamp at the launch sites.
+# ---------------------------------------------------------------------------
+HELPER_ANCHOR = "def _gfx950_gluon_supported(params: _UAParams):\n"
+HELPER_INSERT = '''_LDS_BUDGET_BYTES = 64 * 1024
 
-def main():
+
+def _radiance_fit_lds(tile, stages, head_size, elem_size, budget=_LDS_BUDGET_BYTES):
+    """Clamp a staged K/V tile into the R9700's 64 KiB LDS.
+
+    The kernel stages TILE_SIZE x next_pow2(head_size) at elem_size bytes, num_stages
+    deep, plus ~256 B. Reduce the pipeline depth first, then the tile width, until the
+    tile fits. Returns (tile, stages); a tile that already fits is unchanged.
+    """
+    head_padded = triton.next_power_of_2(int(head_size))
+    elem = 2 if elem_size > 1 else 1
+    tile = int(tile)
+    stages = max(1, int(stages))
+    while stages > 1 and tile * head_padded * elem * stages + 256 > budget:
+        stages -= 1
+    while tile > 16 and tile * head_padded * elem * stages + 256 > budget:
+        tile //= 2
+    return tile, stages
+
+
+'''
+NEW_HELPER_SENTINEL = "def _radiance_fit_lds("
+
+P2D_ANCHOR = (
+    '    assert config["BLOCK_Q"] >= 1\n'
+    '    if params.shuffled_kv_cache:\n'
+    '        config["TILE_SIZE"] = params.block_size\n'
+    '    if params.all_decode:\n'
+)
+P2D_INSERT = (
+    '    assert config["BLOCK_Q"] >= 1\n'
+    '    if params.shuffled_kv_cache:\n'
+    '        config["TILE_SIZE"] = params.block_size\n'
+    '    if DEVICE_ARCH.startswith("gfx12") and not params.shuffled_kv_cache:\n'
+    '        config["TILE_SIZE"], config["num_stages"] = _radiance_fit_lds(\n'
+    '            config["TILE_SIZE"], config.get("num_stages", 1),\n'
+    '            params.head_size, params.k.element_size(),\n'
+    '        )\n'
+    '    if params.all_decode:\n'
+)
+NEW_P2D_SENTINEL = 'config["TILE_SIZE"], config["num_stages"] = _radiance_fit_lds'
+
+P3D_ANCHOR = (
+    '    config = get_unified_attention_config("attn_3d", params, backend="triton")\n'
+    '    config["BLOCK_M"] = max(\n'
+    '        config["BLOCK_M"], triton.next_power_of_2(params.num_queries_per_kv)\n'
+    '    )\n'
+    '    config["BLOCK_Q"] = config["BLOCK_M"] // params.num_queries_per_kv\n'
+    '    assert config["BLOCK_Q"] >= 1\n'
+    '\n'
+    '    if params.all_decode:\n'
+)
+P3D_INSERT = (
+    '    config = get_unified_attention_config("attn_3d", params, backend="triton")\n'
+    '    config["BLOCK_M"] = max(\n'
+    '        config["BLOCK_M"], triton.next_power_of_2(params.num_queries_per_kv)\n'
+    '    )\n'
+    '    config["BLOCK_Q"] = config["BLOCK_M"] // params.num_queries_per_kv\n'
+    '    assert config["BLOCK_Q"] >= 1\n'
+    '    if DEVICE_ARCH.startswith("gfx12") and not params.shuffled_kv_cache:\n'
+    '        TILE_SIZE, config["num_stages"] = _radiance_fit_lds(\n'
+    '            TILE_SIZE, config.get("num_stages", 1),\n'
+    '            params.head_size, params.k.element_size(),\n'
+    '        )\n'
+    '\n'
+    '    if params.all_decode:\n'
+)
+NEW_P3D_SENTINEL = 'TILE_SIZE, config["num_stages"] = _radiance_fit_lds'
+
+
+def _main_old() -> None:
+    apply(F, A3, _fit("3D", "attn_stages") + A3, "RADIANCE LDS fit (3D)", "unified_attention LDS fit (3D)")
+    apply(F, A2, _fit("2D", "num_stages_2d") + A2, "RADIANCE LDS fit (2D)", "unified_attention LDS fit (2D)")
+    apply(F, ANCHOR, ANCHOR + INSERT, "RADIANCE 2-byte", "unified_attention bf16 3D-decode tune")
+
+
+def _main_new() -> None:
+    apply(F, HELPER_ANCHOR, HELPER_INSERT + HELPER_ANCHOR, NEW_HELPER_SENTINEL,
+          "unified_attention LDS fit helper")
+    apply(F, P2D_ANCHOR, P2D_INSERT, NEW_P2D_SENTINEL,
+          "unified_attention LDS fit (2D)")
+    apply(F, P3D_ANCHOR, P3D_INSERT, NEW_P3D_SENTINEL,
+          "unified_attention LDS fit (3D)")
+
+
+def main() -> None:
     if not F.exists():
         print(f"  SKIP  {F} not found (aiter not installed)")
         raise SystemExit(0)
     src = F.read_text()
-    # aiter >= 0.1.21 moved config selection out of this file into
-    # unified_attention_utils.get_unified_attention_config (compute_tile_params /
-    # compute_segment_params). The RDNA LDS-fit overlay was written against the
-    # removed select_3d_config/select_2d_config and is NOT re-ported to the new
-    # schema, so it cannot apply here. This only affects the AITER unified
-    # attention backend; R4D (the primary path) is unaffected.
-    if "def select_3d_config" not in src and "get_unified_attention_config" in src:
-        print("  N/A   aiter >= 0.1.21 moved unified-attention config selection to")
-        print("        unified_attention_utils; the RDNA LDS-fit overlay is not")
-        print("        re-ported. AITER unified attention is unqualified on this")
-        print("        aiter version; R4D attention is unaffected.")
-        raise SystemExit(0)
-    apply(F, A3, _fit("3D", "attn_stages") + A3, "RADIANCE LDS fit (3D)", "unified_attention LDS fit (3D)")
-    apply(F, A2, _fit("2D", "num_stages_2d") + A2, "RADIANCE LDS fit (2D)", "unified_attention LDS fit (2D)")
-    apply(F, ANCHOR, ANCHOR + INSERT, "RADIANCE 2-byte", "unified_attention bf16 3D-decode tune")
+    if "def select_3d_config" in src:
+        _main_old()
+        return
+    if "get_unified_attention_config" in src and "_unified_attention_3d_triton" in src:
+        _main_new()
+        return
+    print("  N/A   unrecognized aiter unified_attention layout; LDS-fit overlay not applied")
+    raise SystemExit(0)
 
 
 if __name__ == "__main__":
