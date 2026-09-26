@@ -43,7 +43,7 @@ Useful knobs: `RADIANCE_VENV`, `RADIANCE_STACK_MODE=amd-wheel|auto|skip`,
 `RADIANCE_ROCM_ROOT` (defaults to `/opt/rocm/core-10.0` when present), `RADIANCE_TORCH_BACKEND`,
 `RADIANCE_INSTALL_MODE=editable|wheel`, `RADIANCE_INSTALL_AITER=1` (+ `RADIANCE_AITER_VERSION`,
 `RADIANCE_AITER_COMMIT`, `RADIANCE_AITER_SPEC`), `RADIANCE_R4D_DIR`,
-`RADIANCE_SKIP_{DEPS,R4D,HIPEXT,PATCHES,CONFIGS,LLVM_LINK,SMOKE}=1`.
+`RADIANCE_SKIP_{DEPS,FORK,R4D,HIPEXT,PATCHES,CONFIGS,LLVM_LINK,SMOKE}=1`.
 
 > `amd-wheel` mode uninstalls `amd-quark`, matching the manual guide. The radiance Quark paths
 > (`RADIANCE_MXFP4*`, `RADIANCE_QUARK_BF16_MTP`) are default-off and guarded, so non-Quark

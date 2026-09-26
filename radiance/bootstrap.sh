@@ -96,6 +96,30 @@ if [ -L "$SP/_rocm_sdk_libraries/lib" ] || [ -L "$SP/_rocm_sdk_core/lib" ]; then
 fi
 
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# amdsmi backs the radiance .pth startup hook (amdsmi_init before HIP). It is not a
+# vLLM dependency. Install from a WRITABLE copy: the ROCm share dir is root-owned and
+# setuptools writes egg-info in place, which fails with "Permission denied".
+if ! "$PY" -c 'import amdsmi' >/dev/null 2>&1; then
+  log "amdsmi"
+  AMD_SMI_SRC=""
+  for cand in "$ROCM_ROOT/share/amd_smi" /opt/rocm/share/amd_smi /opt/rocm/core-10.0/share/amd_smi; do
+    [ -d "$cand" ] && { AMD_SMI_SRC="$cand"; break; }
+  done
+  if [ -n "$AMD_SMI_SRC" ]; then
+    TMP_SMI="$(mktemp -d)"
+    cp -r "$AMD_SMI_SRC/." "$TMP_SMI/"
+    uv pip install --python "$PY" "$TMP_SMI" || warn "amdsmi install failed"
+    rm -rf "$TMP_SMI"
+    "$PY" -c 'import amdsmi; print("amdsmi OK")' || warn "amdsmi import failed"
+  else
+    warn "amd_smi source not found under $ROCM_ROOT/share or /opt/rocm/share"
+  fi
+else
+  log "amdsmi already importable"
+fi
+
+# -----------------------------------------------------------------------------
 log "ROCm python stack (mode=$STACK_MODE)"
 if [ "$STACK_MODE" = "skip" ]; then
   "$PY" -c 'import torch; print("torch", torch.__version__)' || die "torch not importable"
@@ -115,8 +139,6 @@ else
     uv pip install --python "$PY" --upgrade pip
     uv pip install --python "$PY" cmake ninja setuptools-rust wheel pybind11
     if [ "$SKIP_DEPS" != "1" ]; then
-      [ -d "$ROCM_ROOT/share/amd_smi" ] && uv pip install --python "$PY" "$ROCM_ROOT/share/amd_smi" \
-        || warn "amd_smi not found at $ROCM_ROOT/share/amd_smi"
       uv pip install --python "$PY" -r "$ROOT/requirements/rocm.txt"
     fi
     # AMD's prebuilt gfx1201 wheels. The extras pull the matching precompiled Triton,
@@ -198,12 +220,19 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-log "install this fork (mode=$INSTALL_MODE)"
-rm -rf "$ROOT/build" "$ROOT/CMakeCache.txt"
-if [ "$INSTALL_MODE" = "editable" ]; then
-  VLLM_TARGET_DEVICE=rocm uv pip install --python "$PY" --no-build-isolation -e "$ROOT"
+if [ "${RADIANCE_SKIP_FORK:-0}" = "1" ]; then
+  log "fork install skipped (RADIANCE_SKIP_FORK=1)"
 else
-  VLLM_TARGET_DEVICE=rocm uv pip install --python "$PY" --no-build-isolation "$ROOT"
+  log "install this fork (mode=$INSTALL_MODE)"
+  rm -rf "$ROOT/build" "$ROOT/CMakeCache.txt"
+  if [ "$INSTALL_MODE" = "editable" ]; then
+    VLLM_TARGET_DEVICE=rocm uv pip install --python "$PY" --no-build-isolation -e "$ROOT"
+  else
+    VLLM_TARGET_DEVICE=rocm uv pip install --python "$PY" --no-build-isolation "$ROOT"
+  fi
+  # vLLM's install re-resolves requirements/rocm.txt, which re-adds amd-quark. The
+  # image removes it (circular import on vLLM main), so remove it again after the build.
+  uv pip uninstall --python "$PY" amd-quark 2>/dev/null || true
 fi
 SP="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 
@@ -224,7 +253,7 @@ if [ "$SKIP_R4D" != "1" ]; then
   git -C "$SRC" apply --check "$PATCHES/r4d_radiance_extras.patch" 2>/dev/null \
     && git -C "$SRC" apply "$PATCHES/r4d_radiance_extras.patch" \
     || warn "r4d extras patch already applied or not applicable; continuing"
-  ( cd "$SRC" && GFX_ARCH="$GFX_ARCH" OUT="$SP/r4d.so" ./build.sh )
+  ( cd "$SRC" && PATH="$VENV/bin:$PATH" GFX_ARCH="$GFX_ARCH" OUT="$SP/r4d.so" ./build.sh )
   "$PY" - <<PY
 import r4d
 print("r4d", r4d.__version__, "kernels", len(r4d.kernels()))
