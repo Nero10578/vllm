@@ -310,6 +310,7 @@ if [ "$SKIP_PATCHES" != "1" ]; then
     echo "-- $p"
     "$PY" "$p.py" || warn "$p reported a drift/failure; inspect before relying on it"
   done
+  cd "$ROOT"
 else
   log "out-of-tree patches skipped"
 fi
@@ -320,13 +321,20 @@ if [ "$SKIP_SMOKE" != "1" ]; then
   "$PY" - <<'PY'
 import importlib.metadata as md
 import torch, vllm, amdsmi
-print("vllm", vllm.__version__, "| torch", torch.__version__,
+vver = getattr(vllm, "__version__", None) or md.version("vllm")
+print("vllm", vver, "| torch", torch.__version__,
       "| torchvision", md.version("torchvision"), "| triton", md.version("triton"))
 try:
     import r4d
-    print("r4d", r4d.__version__)
+    print("r4d", r4d.__version__, "kernels", len(r4d.kernels()))
 except Exception as e:
     print("r4d not loaded:", e)
+try:
+    import radiance_mxfp4_fp8  # noqa: F401
+    import radiance_kernels  # noqa: F401
+    print("radiance runtime modules OK")
+except Exception as e:
+    print("radiance runtime modules FAILED:", e)
 PY
 fi
 

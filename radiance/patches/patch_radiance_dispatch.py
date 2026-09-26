@@ -73,7 +73,16 @@ def main():
             print(f"  DEFER {CFG.name} (out-of-tree aiter; applied by the uv bootstrap)")
         else:
             raise
-    apply(KERN, KERN_ANCHOR, KERN_NEW, "gfx1201 custom kernel dispatcher", "apply_block_scaled_mm -> dispatcher hook")
+    # Editable installs resolve the vLLM package to the repo source, not
+    # site-packages/vllm, so the file is absent here even though the hunk is baked
+    # into the fork. Treat a missing path as already-provided by the source tree.
+    try:
+        apply(KERN, KERN_ANCHOR, KERN_NEW, "gfx1201 custom kernel dispatcher", "apply_block_scaled_mm -> dispatcher hook")
+    except SystemExit as exc:
+        if "missing" in str(exc):
+            print(f"  NOOP {KERN.name} (editable install; hunk is baked into the fork source)")
+        else:
+            raise
 
 
 if __name__ == "__main__":
