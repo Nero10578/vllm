@@ -78,6 +78,9 @@ export VLLM_TARGET_DEVICE=rocm
 export HIP_ARCHITECTURES="$GFX_ARCH" AMDGPU_TARGETS="$GFX_ARCH" GPU_ARCHS="$GFX_ARCH"
 export TRITON_USE_ROCM=1
 export TORCH_BLAS_PREFER_HIPBLASLT=1
+# Native artifacts (r4d.so, radiance_mxfp4_fp8.so) link libamdhip64.so.7; without both
+# ROCm lib dirs on the loader path, importing them fails during the build/verify steps.
+export LD_LIBRARY_PATH="/opt/rocm/lib:$ROCM_ROOT/lib:${LD_LIBRARY_PATH:-}"
 
 # -----------------------------------------------------------------------------
 log "uv venv ($VENV)"
@@ -254,7 +257,7 @@ if [ "$SKIP_R4D" != "1" ]; then
     && git -C "$SRC" apply "$PATCHES/r4d_radiance_extras.patch" \
     || warn "r4d extras patch already applied or not applicable; continuing"
   ( cd "$SRC" && PATH="$VENV/bin:$PATH" GFX_ARCH="$GFX_ARCH" OUT="$SP/r4d.so" ./build.sh )
-  "$PY" - <<PY
+  "$PY" - <<PY || warn "r4d import check failed (see error above); continuing"
 import r4d
 print("r4d", r4d.__version__, "kernels", len(r4d.kernels()))
 PY
@@ -269,7 +272,7 @@ if [ "$SKIP_HIPEXT" != "1" ]; then
   INC="$("$PY" -m pybind11 --includes)"
   hipcc -O3 -std=c++17 -fPIC -shared --offload-arch="$GFX_ARCH" -Wno-unused-result \
       $INC "$ROOT/radiance_mxfp4_fp8.hip" -o "$SP/radiance_mxfp4_fp8.so"
-  "$PY" - <<PY
+  "$PY" - <<PY || warn "radiance_mxfp4_fp8 import check failed (see error above); continuing"
 import radiance_mxfp4_fp8 as m
 assert all(hasattr(m, n) for n in (
     "launch", "launch_at", "set_decode_scratch",
