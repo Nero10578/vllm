@@ -1,5 +1,8 @@
 # Radiance on baremetal (uv)
 
+> **Full from-zero runbook:** see [`BAREMETAL_SETUP.md`](BAREMETAL_SETUP.md) — prerequisites, clone,
+> bootstrap, serve, every issue we hit with its fix, and the open AITER gap.
+
 This directory turns the fork into the **vllm-radiance** distribution without Docker, so vLLM can
 be built and installed on a bare-metal ROCm host with `uv` managing the Python environment.
 
