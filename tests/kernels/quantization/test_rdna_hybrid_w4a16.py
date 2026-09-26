@@ -405,6 +405,68 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
     torch.testing.assert_close(w_q_i32, expected_packed)
 
 
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+def test_rdna_hybrid_w4a16_symmetric_ignores_stale_qzeros():
+    """AutoGPTQ registers a `qzeros` param even for symmetric uint4b8.
+
+    `process_weights_after_loading` skips zero-point normalization when
+    `zero_points=False`, so `apply_weights` must not feed the raw
+    checkpoint-layout qzeros ([K//G, N//8]) to the kernel; it has to use the
+    constant bias path instead.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.scalar_type import scalar_types
+
+    set_random_seed(0)
+
+    # M > MAX_SKINNY_BATCH_SIZE and K*M > LDS capacity forces the Triton path,
+    # where the packed zp shape is asserted.
+    K, N, G, M = 1024, 256, 128, 64
+    assert K % G == 0 and N % 8 == 0
+
+    w_int4_kn = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    w_ckpt_nk8 = _pack_int4_along_k_to_ckpt(w_int4_kn)
+    scales_ckpt_nkg = 0.05 * torch.rand((N, K // G), device=device, dtype=torch.float16)
+
+    # Stale AutoGPTQ qzeros in checkpoint layout [K//G, N//8] int32 (all 8s).
+    qzeros_ckpt_gn8 = torch.full(
+        (K // G, N // 8), -0x77777778, device=device, dtype=torch.int32
+    )
+
+    layer = _build_dummy_layer(
+        w_ckpt_nk8, scales_ckpt_nkg, zeros_ckpt=qzeros_ckpt_gn8
+    )
+    config = MPLinearLayerConfig(
+        full_weight_shape=(K, N),
+        partition_weight_shape=(K, N),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=G,
+        zero_points=False,
+    )
+    kernel = RDNAHybridW4A16LinearKernel(
+        config,
+        w_q_param_name="weight_packed",
+        w_s_param_name="weight_scale",
+        w_zp_param_name="weight_zero_point",
+    )
+    kernel.process_weights_after_loading(layer)
+
+    x_mk = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(
+        torch.float16
+    )
+    out = kernel.apply_weights(layer, x_mk)
+    ref = _rdna_hybrid_w4a16_reference(
+        x_mk, w_int4_kn.t().contiguous(), scales_ckpt_nkg, None, G, bias=None
+    )
+    torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
+
+
 # ---------------------------------------------------------------------------
 # can_implement enforces the supported-group-size policy
 # ---------------------------------------------------------------------------
