@@ -155,6 +155,39 @@ if [ "$SKIP_LLVM_LINK" != "1" ] && [ "$STACK_MODE" = "amd-wheel" ]; then
 fi
 
 # -----------------------------------------------------------------------------
+# AITER is NOT a vLLM requirement (vllm/_aiter_ops.py guards the import), so the
+# fork builds and serves without it on the R4D path. But the qualified image builds
+# AITER for gfx1201: it provides the ROCM_AITER_UNIFIED_ATTN fallback backend, the
+# preshuffle FP8 blockscale GEMM (RADIANCE_PRESHUFFLE), and the GDN AITER knobs, and
+# it is the target of patch_unified_attention_lds + patch_radiance_dispatch's SPLITK
+# hunk. Opt in with RADIANCE_INSTALL_AITER=1.
+if [ "${RADIANCE_INSTALL_AITER:-0}" = "1" ]; then
+  log "AITER (gfx1201, source build; kernels JIT at runtime)"
+  AITER_VERSION="${RADIANCE_AITER_VERSION:-0.1.20}"
+  AITER_COMMIT="${RADIANCE_AITER_COMMIT:-fc2e5d57fb5b8ad8e7e23f7103071dde798ea618}"
+  # Try a published wheel first (fast path); fall back to the pinned source build.
+  if uv pip install --python "$PY" "amd-aiter==${AITER_VERSION}" 2>/dev/null; then
+    echo "installed amd-aiter==${AITER_VERSION} from the index"
+  else
+    warn "no amd-aiter wheel for this platform/version; building from ROCm/aiter @ ${AITER_COMMIT:0:12}"
+    warn "note: the image's AITER pin targets torch 2.12/ROCm 7.14; on torch 2.13/ROCm 10 this"
+    warn "commit may need bumping (set RADIANCE_AITER_COMMIT to a torch-2.13-compatible commit)."
+    AW="$(mktemp -d)"
+    git clone --filter=blob:none --no-checkout https://github.com/ROCm/aiter.git "$AW/aiter"
+    git -C "$AW/aiter" fetch --depth 1 origin "$AITER_COMMIT" || true
+    git -C "$AW/aiter" checkout --detach "$AITER_COMMIT"
+    ( cd "$AW/aiter" && GPU_ARCHS="$GFX_ARCH" PREBUILD_KERNELS=0 AITER_USE_SYSTEM_TRITON=1 \
+        SETUPTOOLS_SCM_PRETEND_VERSION="$AITER_VERSION" \
+        uv pip install --python "$PY" --no-build-isolation --no-deps . )
+    rm -rf "$AW"
+  fi
+  "$PY" -c 'import importlib.metadata as m; print("aiter", m.version("amd-aiter"))' \
+    || warn "aiter version check failed"
+else
+  log "AITER skipped (set RADIANCE_INSTALL_AITER=1 for the AITER fallback backends/GEMM)"
+fi
+
+# -----------------------------------------------------------------------------
 log "install this fork (mode=$INSTALL_MODE)"
 rm -rf "$ROOT/build" "$ROOT/CMakeCache.txt"
 if [ "$INSTALL_MODE" = "editable" ]; then

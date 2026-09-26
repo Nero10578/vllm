@@ -41,13 +41,22 @@ out-of-tree patches.
 
 Useful knobs: `RADIANCE_VENV`, `RADIANCE_STACK_MODE=amd-wheel|auto|skip`,
 `RADIANCE_ROCM_ROOT` (defaults to `/opt/rocm/core-10.0` when present), `RADIANCE_TORCH_BACKEND`,
-`RADIANCE_INSTALL_MODE=editable|wheel`, `RADIANCE_R4D_DIR`,
+`RADIANCE_INSTALL_MODE=editable|wheel`, `RADIANCE_INSTALL_AITER=1` (+ `RADIANCE_AITER_VERSION`,
+`RADIANCE_AITER_COMMIT`), `RADIANCE_R4D_DIR`,
 `RADIANCE_SKIP_{DEPS,R4D,HIPEXT,PATCHES,CONFIGS,LLVM_LINK,SMOKE}=1`.
 
 > `amd-wheel` mode uninstalls `amd-quark`, matching the manual guide. The radiance Quark paths
 > (`RADIANCE_MXFP4*`, `RADIANCE_QUARK_BF16_MTP`) are default-off and guarded, so non-Quark
-> checkpoints are unaffected. `aiter` is optional: `patch_unified_attention_lds` and the MXFP4 tile
-> copy are skipped with a warning when it is absent.
+> checkpoints are unaffected.
+>
+> **AITER is not installed by default.** It is not a vLLM dependency (the fork guards its import),
+> and the R4D path does not need it. Set `RADIANCE_INSTALL_AITER=1` to build AITER for gfx1201
+> (pinned to the image's `AITER_COMMIT`, overridable via `RADIANCE_AITER_{VERSION,COMMIT}`) — it
+> provides the `ROCM_AITER_UNIFIED_ATTN` fallback backend, the preshuffle FP8 blockscale GEMM
+> (`RADIANCE_PRESHUFFLE`), the GDN AITER knobs, and the targets of `patch_unified_attention_lds`
+> plus `patch_radiance_dispatch`'s `SPLITK` hunk. The image's AITER pin targets torch 2.12 / ROCm
+> 7.14, so on torch 2.13 / ROCm 10 it may need a newer commit. When AITER is absent, that out-of-tree
+> patch and the MXFP4 tile copy skip with a warning.
 
 ## Port status versus vllm-radiance v0.28.0
 

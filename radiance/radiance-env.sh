@@ -33,6 +33,17 @@ export TRITON_USE_ROCM="${TRITON_USE_ROCM:-1}"
 # AMD-recommended FP16 GEMM path on the R9700.
 export TORCH_BLAS_PREFER_HIPBLASLT="${TORCH_BLAS_PREFER_HIPBLASLT:-1}"
 
+# --- AITER fallback backends (optional) --------------------------------------
+# R4D is the primary attention path. To use AITER's attention instead (e.g. the
+# head-512 drafter, which flash_attn cannot serve), uncomment these and pass
+# --attention-backend=ROCM_AITER_UNIFIED_ATTN on both target and speculative config.
+# AITER is not a vLLM dependency; install it with RADIANCE_INSTALL_AITER=1 in bootstrap.sh.
+# export VLLM_ROCM_USE_AITER=1
+# export VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
+# export VLLM_ROCM_USE_AITER_MHA=0
+# export VLLM_ROCM_USE_AITER_MLA=0
+# export VLLM_ROCM_USE_AITER_MOE=0
+
 # --- runtime hygiene ---------------------------------------------------------
 export SAFETENSORS_FAST_GPU="${SAFETENSORS_FAST_GPU:-1}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
