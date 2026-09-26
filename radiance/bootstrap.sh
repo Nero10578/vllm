@@ -39,7 +39,11 @@ TORCH_VERSION="${RADIANCE_TORCH_VERSION:-2.13.0}"
 TORCHVISION_VERSION="${RADIANCE_TORCHVISION_VERSION:-0.28.0}"
 TORCHAUDIO_VERSION="${RADIANCE_TORCHAUDIO_VERSION:-2.11.0.2}"
 ROCM_WHEEL_INDEX="${RADIANCE_ROCM_WHEEL_INDEX:-https://stable.repo.amd.com/rocm/whl-next/}"
-INSTALL_MODE="${RADIANCE_INSTALL_MODE:-editable}"   # editable | wheel
+# wheel (default, mirrors the image) installs a real site-packages/vllm so the config
+# copy and out-of-tree patches land in the actual package. editable is supported but
+# the setuptools editable finder does not get along with the config copy into
+# site-packages/vllm; use wheel unless you have a reason to edit the source live.
+INSTALL_MODE="${RADIANCE_INSTALL_MODE:-wheel}"   # wheel | editable
 
 # ROCm 10 keeps the SDK under /opt/rocm/core-10.0; fall back to /opt/rocm.
 ROCM_ROOT="${RADIANCE_ROCM_ROOT:-}"
@@ -228,6 +232,8 @@ if [ "${RADIANCE_SKIP_FORK:-0}" = "1" ]; then
 else
   log "install this fork (mode=$INSTALL_MODE)"
   rm -rf "$ROOT/build" "$ROOT/CMakeCache.txt"
+  # Remove any prior install (including a stale editable finder/.pth) before reinstalling.
+  uv pip uninstall --python "$PY" vllm 2>/dev/null || true
   if [ "$INSTALL_MODE" = "editable" ]; then
     VLLM_TARGET_DEVICE=rocm uv pip install --python "$PY" --no-build-isolation -e "$ROOT"
   else
