@@ -64,14 +64,16 @@ Useful knobs: `RADIANCE_VENV`, `RADIANCE_STACK_MODE=amd-wheel|auto|skip`,
 > version changes the AITER-backed tuning paths, so treat it as a re-qualification. When AITER is
 > absent, the aiter out-of-tree patch and the MXFP4 tile copy skip with a warning.
 >
-> **aiter version note:** aiter >= 0.1.21 rewrote `unified_attention.py` and moved config selection to
-> `unified_attention_utils.get_unified_attention_config`. `patch_unified_attention_lds` now handles
-> **both** layouts: for <= 0.1.20 it edits the old selectors, and for >= 0.1.21 it injects a
+> **aiter version note (0.1.23 validated):** the ROCm AITER unified-attention backend now serves on
+> aiter 0.1.23 at TP8. Three aiter-0.1.23 compatibility items were needed and are handled:
+> (1) `patch_unified_attention_lds` was re-ported for >= 0.1.21 (the file was rewritten and config
+> selection moved to `unified_attention_utils.get_unified_attention_config`); it now injects a
 > `_radiance_fit_lds` helper and clamps the staged tile in `_unified_attention_2d_triton` /
-> `_unified_attention_3d_triton`. The >= 0.1.21 path was validated against the v0.1.23 source
-> (anchors + AST) but has **not** been exercised on hardware yet — the failure mode it prevents is a
-> Triton `OutOfResources` at CUDA-graph capture for head_size 256 (2-byte KV) / 512 (fp8). `R4D` is
-> still the primary attention path; `patch_radiance_dispatch`'s aiter `SPLITK` fix applies on 0.1.23.
+> `_unified_attention_3d_triton` so head_size 256 (2-byte KV) / 512 (fp8) stay inside the R9700's
+> 64 KiB LDS; (2) vLLM's `rocm_aiter_unified_attn.py` now imports the moved module
+> (`aiter.ops.triton.attention.unified_attention`, falling back to the old path); (3) aiter's own
+> `flydsl` dependency (skipped by the `--no-deps` aiter build) is installed. `R4D` remains the
+> primary TP2 attention path; `patch_radiance_dispatch`'s aiter `SPLITK` fix also applies on 0.1.23.
 
 ## Port status versus vllm-radiance v0.28.0
 

@@ -186,8 +186,25 @@ Notes:
   attention and the radiance kernels stay idle.
 - `radiance-env.sh` sets the qualified `RADIANCE_*` defaults and the ROCm 10 loader paths. Source it;
   don't hand-roll them.
-- The qualified envelope is TP2, FP8 KV, prefix caching + `--mamba-cache-mode=align`, 16K, 85%,
-  8 seqs. `-tp 8` works but is outside the qualified envelope (R4D AR is an exact TP2 P2P path).
+- The qualified R4D envelope is TP2, FP8 KV, prefix caching + `--mamba-cache-mode=align`, 16K, 85%,
+  8 seqs.
+- **TP8 requires the AITER attention backend, not R4D.** R4D's kernel is compiled for the TP2 head
+  geometry (`gqa == 6`); at TP8 the per-rank ratio is `gqa=3` and R4D refuses with
+  `NotImplementedError … needs == 6`. For 8 GPUs either use 4× TP2 data-parallel replicas
+  (`-tp 2 --data-parallel-size 4`, keeps R4D), or switch to AITER unified attention:
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
+  export VLLM_ROCM_USE_AITER_MHA=0
+  export VLLM_ROCM_USE_AITER_MLA=0
+  export VLLM_ROCM_USE_AITER_MOE=0
+  ...
+  vllm serve … -tp 8 … --attention-backend=ROCM_AITER_UNIFIED_ATTN …
+  ```
+
+  R4D's exact TP2 all-reduce falls back to RCCL at TP8; the rest of the radiance stack still runs.
+  See section 6 for the aiter-status details.
 
 Test:
 
@@ -267,19 +284,30 @@ exist. `patch_unified_attention_lds.py` now handles **both** layouts:
   guarded to `gfx12` and skipped for shuffled/registered caches (their tile must equal the page).
 
 **Status:** the >= 0.1.21 path was validated against the real v0.1.23 source (anchors match, AST
-parses, idempotent) but has **not run on hardware**. When you switch to AITER attention, watch for a
-Triton `OutOfResources` at CUDA-graph capture or a wrong-result; the knob to tune if it appears is
-the clamp budget (currently 64 KiB) or the gfx1201 `TILE_SIZE_MIN/MAX` in the aiter config.
+parses, idempotent) **and exercised on hardware**: AITER unified attention serves at TP8 on
+Qwen3.5-27B-FP8 with no `OutOfResources`. Two other aiter-0.1.23 compatibility items are required
+(and are handled in the branch/bootstrap):
+
+- **vLLM import path.** aiter >= 0.1.21 moved the module to
+  `aiter.ops.triton.attention.unified_attention`; vLLM's `rocm_aiter_unified_attn.py` imported only
+  the old `aiter.ops.triton.unified_attention`, giving `ModuleNotFoundError`. vLLM now tries the new
+  path first and falls back to the old one.
+- **`flydsl` dependency.** aiter is installed with `--no-deps` (so it cannot replace torch/triton),
+  but aiter >= 0.1.21's `__init__.py` imports `topk_select` → `flydsl`. bootstrap now installs
+  `flydsl==0.3.4.1` (override with `RADIANCE_FLYDSL_SPEC`) plus aiter's other runtime deps.
+
+If you ever see a Triton `OutOfResources` at capture again (e.g. a different block size / head),
+the knob to tune is the clamp budget (currently 64 KiB) or the gfx1201 `TILE_SIZE_MIN/MAX` in the
+aiter config.
 
 **Options:**
 
-1. **Keep using R4D** (default tuned path) — the overlay is dormant and irrelevant.
-2. **Use AITER unified attention on 0.1.23** — the re-ported clamp is installed by bootstrap; enable
-   `VLLM_ROCM_USE_AITER*` (below) and `--attention-backend=ROCM_AITER_UNIFIED_ATTN`, then validate.
-   This is what you need to run a geometry R4D can't (e.g. TP8's `gqa=3`, or the head-512 Gemma
-   drafter).
+1. **Keep using R4D** (default tuned path, TP2 geometry only) — the LDS overlay is dormant there.
+2. **Use AITER unified attention** — enable `VLLM_ROCM_USE_AITER*` (below) and
+   `--attention-backend=ROCM_AITER_UNIFIED_ATTN`. This is the path for geometries R4D can't serve,
+   notably **TP8** (`gqa=3`) and the head-512 Gemma drafter. Validated at TP8.
 3. **Pin aiter 0.1.20** (the qualified image version) so the old-layout overlay applies as written —
-   risk: may not build against torch 2.13 / ROCm 10.
+   but then you also lose the 0.1.23 support; risk: may not build against torch 2.13 / ROCm 10.
 
 The aiter change that matters for GEMM applied regardless: `patch_radiance_dispatch`'s `SPLITK`
 alignment fix (visible as `# --- radiance fix (patch_radiance_dispatch.py): scale-alignment guard ---`
@@ -352,10 +380,10 @@ site-packages instead of a full rebuild.
 | libr4d (r4d.so, 20 kernels) | Built; all 15 runtime lookups resolved on Qwen3.5-27B-FP8 |
 | MXFP4/W4A8 HIP extension | Built |
 | Tuned FP8/MoE/MXFP4 configs | Installed and selected at runtime |
-| R4D attention (fp8 KV), GDN, TP2 AR, verify head, dynamic draft | Live and serving |
+| R4D attention (fp8 KV), GDN, TP2 AR, verify head, dynamic draft | Live and serving (TP2) |
 | `patch_kv_offload_restore` | **Deferred** — upstream rewrote hybrid cache annotation; needs re-qualification |
-| AITER on 0.1.23 | **Partially qualified** — SPLITK fix applies; LDS-fit overlay re-ported for >= 0.1.21 (source-validated, hardware validation pending); AITER unified attention usable but unproven (section 6) |
-| Baremetal serving | Validated on dual R9700 (Qwen3.5-27B-FP8, TP2, FP8 KV) |
+| AITER on 0.1.23 | **Qualified on hardware** — SPLITK fix + re-ported LDS clamp applied; vLLM import-path shim (`attention.unified_attention`) and aiter's `flydsl` dep installed; AITER unified attention serving at **TP8** (section 6) |
+| Baremetal serving | Validated on R9700: Qwen3.5-27B-FP8 at TP2 (R4D) and TP8 (AITER unified attn) |
 
 This fork is a forward-port of the radiance overlays onto a newer vLLM base; it is not byte-identical
 to the published image. Treat per-path parity as something to confirm with matched benchmarks.
