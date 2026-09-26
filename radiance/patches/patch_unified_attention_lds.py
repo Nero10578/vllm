@@ -74,6 +74,22 @@ INSERT = (
 
 
 def main():
+    if not F.exists():
+        print(f"  SKIP  {F} not found (aiter not installed)")
+        raise SystemExit(0)
+    src = F.read_text()
+    # aiter >= 0.1.21 moved config selection out of this file into
+    # unified_attention_utils.get_unified_attention_config (compute_tile_params /
+    # compute_segment_params). The RDNA LDS-fit overlay was written against the
+    # removed select_3d_config/select_2d_config and is NOT re-ported to the new
+    # schema, so it cannot apply here. This only affects the AITER unified
+    # attention backend; R4D (the primary path) is unaffected.
+    if "def select_3d_config" not in src and "get_unified_attention_config" in src:
+        print("  N/A   aiter >= 0.1.21 moved unified-attention config selection to")
+        print("        unified_attention_utils; the RDNA LDS-fit overlay is not")
+        print("        re-ported. AITER unified attention is unqualified on this")
+        print("        aiter version; R4D attention is unaffected.")
+        raise SystemExit(0)
     apply(F, A3, _fit("3D", "attn_stages") + A3, "RADIANCE LDS fit (3D)", "unified_attention LDS fit (3D)")
     apply(F, A2, _fit("2D", "num_stages_2d") + A2, "RADIANCE LDS fit (2D)", "unified_attention LDS fit (2D)")
     apply(F, ANCHOR, ANCHOR + INSERT, "RADIANCE 2-byte", "unified_attention bf16 3D-decode tune")
