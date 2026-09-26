@@ -114,7 +114,7 @@ class Fp8BlockScaledMMLinearKernel(
 
         # View input as 2D matrix for fp8 methods
         input_2d = x.view(-1, x.shape[-1])
-        output_shape = [*x.shape[:-1], weight.shape[0]]
+        output_shape = [*x.shape[:-1], getattr(layer, "_radiance_N", weight.shape[0])]  # radiance preshuffle: true N
 
         if self.apply_input_quant:
             q_input, input_scale = self.quant_fp8(

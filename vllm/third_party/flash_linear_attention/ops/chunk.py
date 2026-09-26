@@ -20,6 +20,11 @@ from .utils import FLA_CHUNK_SIZE, SUPPRESS_LEVEL, input_guard
 from .wy_fast import recompute_w_u_fwd
 
 
+try:
+    import radiance_gdn as _radiance_gdn
+except Exception:
+    _radiance_gdn = None
+
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -49,6 +54,16 @@ def chunk_gated_delta_rule_fwd(
     A = solve_tril(
         A=A, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, output_dtype=k.dtype
     )
+    # --- RADIANCE fused GDN prefill kernel (patch_r4d.py) ---
+    # One kernel for the WY representation, the state scan and the output. It returns None
+    # for any shape it was not compiled for, which leaves the Triton path below untouched.
+    if _radiance_gdn is not None and _radiance_gdn.ENABLED and SUPPRESS_LEVEL < 3:
+        _fused = _radiance_gdn.fused_prefill(
+            q, k, v, A, g, beta, scale, initial_state, output_final_state, cu_seqlens,
+            core_attn_out,
+        )
+        if _fused is not None:
+            return g, _fused[0], A, _fused[1], None, None, None
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,

@@ -1114,6 +1114,19 @@ class ParserEngine(Parser):
                             "arg converter failed (extract): %s", raw_body[:80]
                         )
                         args_json = self._extract_args_json(raw_body, name)
+                    else:
+                        # vLLM #47137: a call truncated mid-parameter drops
+                        # the unterminated value under partial=False, but a
+                        # streaming client already received it. When
+                        # partial=True parses further, the body is truncated;
+                        # emit the exact streamed args so non-streaming agrees
+                        # with streaming.
+                        try:
+                            partial_json = converter(raw_body, True)
+                        except (json.JSONDecodeError, ValueError, TypeError):
+                            partial_json = args_json
+                        if partial_json != args_json and slot.streamed_json:
+                            args_json = slot.streamed_json
                 else:
                     args_json = self._extract_args_json(raw_body, name)
             else:

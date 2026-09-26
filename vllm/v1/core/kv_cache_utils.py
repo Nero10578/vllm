@@ -1435,8 +1435,62 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
     return not kv_cache_spec
 
 
+def _radiance_pick_group_size(layer_buckets, spec_buckets, vllm_config, upstream):
+    """Group size maximising usable KV cache. See patch_kv_group_size.py."""
+    import os
+
+    if os.environ.get("RADIANCE_KV_GROUP_OPT", "1") == "0":
+        return upstream
+    forced = os.environ.get("RADIANCE_KV_GROUP_SIZE")
+    if forced:
+        return max(1, int(forced))
+    if vllm_config is None:
+        return upstream
+    try:
+        sizes = [len(layers) for layers in layer_buckets]
+        page = max(s.page_size_bytes for specs in spec_buckets for s in specs)
+        # Blocks one group of each bucket reserves for a worst-case request. This is the
+        # term upstream ignores: a full-attention group costs cdiv(max_model_len,
+        # block_size) blocks, a mamba group costs a handful, so splitting the expensive
+        # bucket into more groups costs far more than a few padded layer slots.
+        cost = [
+            max(cdiv(s.max_memory_usage_bytes(vllm_config), page) for s in specs)
+            for specs in spec_buckets
+        ]
+    except Exception:  # never fail a serve over an optimisation
+        return upstream
+
+    max_groups = int(os.environ.get("RADIANCE_KV_GROUP_MAX_GROUPS") or 24)
+    best = None
+    for g in range(1, max(sizes) + 1):
+        splits = [cdiv(L, g) for L in sizes]
+        eff = max(cdiv(L, k) for L, k in zip(sizes, splits))
+        if eff != g:
+            continue  # non-canonical: an equivalent smaller g covers this split
+        ngroups = sum(splits)
+        if ngroups > max_groups:
+            continue
+        blocks = sum(k * c for k, c in zip(splits, cost))
+        key = (g * blocks, ngroups)
+        if best is None or key < best[0]:
+            best = (key, g, ngroups, blocks)
+    if best is None:
+        return upstream
+    _, g, ngroups, blocks = best
+    logger.info(
+        "[radiance] kv cache groups: size %d, %d groups, %d blocks/request "
+        "(upstream would pick size %d)",
+        g,
+        ngroups,
+        blocks,
+        upstream,
+    )
+    return g
+
+
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    vllm_config=None,
 ) -> list[KVCacheGroupSpec]:
     """Generates the KV cache groups for hybrid models with multiple
     attention types but still with a uniform page size (physical memory per
@@ -1552,6 +1606,13 @@ def _get_kv_cache_groups_uniform_page_size(
         # layers while accommodating speculative decoding drafters that add
         # extra layers to one attention type.
         group_size = max_num_layers
+    # --- radiance (patch_kv_group_size.py) ---
+    # The rule above assumes an n:1 layer pattern; 48 GDN + 16 full + 5 drafter is not one,
+    # and picking the smallest bucket (5) splits the 16 expensive full-attention layers
+    # across 4 groups. Search for the size that maximises usable cache instead.
+    group_size = _radiance_pick_group_size(
+        layer_buckets, spec_buckets, vllm_config, group_size
+    )
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size
@@ -2351,7 +2412,7 @@ def get_kv_cache_groups(
         if fallback_groups is None:
             raise
         return fallback_groups
-    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec, vllm_config)
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:

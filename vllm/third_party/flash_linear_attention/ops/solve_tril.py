@@ -25,6 +25,16 @@ assert FLA_TRIL_PRECISION in ALLOWED_TRIL_PRECISIONS, (
 )
 
 
+@triton.jit
+def _tril_dot(a, b, input_precision: tl.constexpr):
+    # gfx1201 (RDNA4) has no fp32/tf32 matrix-core path, so an fp32-operand dot
+    # lowers to a slow scalar loop. Casting both operands to fp16 selects WMMA.
+    # The block-inverse operands are the L2-normalized-key gram and its unit-
+    # diagonal inverse (all O(1)); the result is stored bf16 downstream, so fp16
+    # (10-bit mantissa) intermediates are strictly finer than the store target.
+    return tl.dot(a.to(tl.float16), b.to(tl.float16))
+
+
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[
@@ -182,8 +192,8 @@ def merge_16x16_to_32x32_inverse_kernel(
     else:
         b_A_21 = desc.load([i_t * BT + 16, 0]).to(tl.float32)
 
-    b_Ai_21 = -tl.dot(
-        tl.dot(b_Ai_22, b_A_21, input_precision=DOT_PRECISION),
+    b_Ai_21 = -_tril_dot(
+        _tril_dot(b_Ai_22, b_A_21, input_precision=DOT_PRECISION),
         b_Ai_11,
         input_precision=DOT_PRECISION,
     )
@@ -353,39 +363,39 @@ def merge_16x16_to_64x64_inverse_kernel(
         b_A_42 = desc.load([i_t * BT + 48, 16]).to(tl.float32)
         b_A_43 = desc.load([i_t * BT + 48, 32]).to(tl.float32)
 
-    b_Ai_21 = -tl.dot(
-        tl.dot(b_Ai_22, b_A_21, input_precision=DOT_PRECISION),
+    b_Ai_21 = -_tril_dot(
+        _tril_dot(b_Ai_22, b_A_21, input_precision=DOT_PRECISION),
         b_Ai_11,
         input_precision=DOT_PRECISION,
     )
-    b_Ai_32 = -tl.dot(
-        tl.dot(b_Ai_33, b_A_32, input_precision=DOT_PRECISION),
+    b_Ai_32 = -_tril_dot(
+        _tril_dot(b_Ai_33, b_A_32, input_precision=DOT_PRECISION),
         b_Ai_22,
         input_precision=DOT_PRECISION,
     )
-    b_Ai_43 = -tl.dot(
-        tl.dot(b_Ai_44, b_A_43, input_precision=DOT_PRECISION),
+    b_Ai_43 = -_tril_dot(
+        _tril_dot(b_Ai_44, b_A_43, input_precision=DOT_PRECISION),
         b_Ai_33,
         input_precision=DOT_PRECISION,
     )
 
-    b_Ai_31 = -tl.dot(
+    b_Ai_31 = -_tril_dot(
         b_Ai_33,
-        tl.dot(b_A_31, b_Ai_11, input_precision=DOT_PRECISION)
-        + tl.dot(b_A_32, b_Ai_21, input_precision=DOT_PRECISION),
+        _tril_dot(b_A_31, b_Ai_11, input_precision=DOT_PRECISION)
+        + _tril_dot(b_A_32, b_Ai_21, input_precision=DOT_PRECISION),
         input_precision=DOT_PRECISION,
     )
-    b_Ai_42 = -tl.dot(
+    b_Ai_42 = -_tril_dot(
         b_Ai_44,
-        tl.dot(b_A_42, b_Ai_22, input_precision=DOT_PRECISION)
-        + tl.dot(b_A_43, b_Ai_32, input_precision=DOT_PRECISION),
+        _tril_dot(b_A_42, b_Ai_22, input_precision=DOT_PRECISION)
+        + _tril_dot(b_A_43, b_Ai_32, input_precision=DOT_PRECISION),
         input_precision=DOT_PRECISION,
     )
-    b_Ai_41 = -tl.dot(
+    b_Ai_41 = -_tril_dot(
         b_Ai_44,
-        tl.dot(b_A_41, b_Ai_11, input_precision=DOT_PRECISION)
-        + tl.dot(b_A_42, b_Ai_21, input_precision=DOT_PRECISION)
-        + tl.dot(b_A_43, b_Ai_31, input_precision=DOT_PRECISION),
+        _tril_dot(b_A_41, b_Ai_11, input_precision=DOT_PRECISION)
+        + _tril_dot(b_A_42, b_Ai_21, input_precision=DOT_PRECISION)
+        + _tril_dot(b_A_43, b_Ai_31, input_precision=DOT_PRECISION),
         input_precision=DOT_PRECISION,
     )
 

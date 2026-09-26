@@ -1526,6 +1526,9 @@ setup(
     version=vllm_version,
     ext_modules=ext_modules,
     rust_extensions=rust_extensions,
+    # Radiance runtime modules (gfx1201 hooks/kernels) are top-level modules, matching the
+    # layout the radiance patched code imports (`import radiance_kernels`, ...).
+    py_modules=[p.stem for p in ROOT_DIR.glob("radiance_*.py")],
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch

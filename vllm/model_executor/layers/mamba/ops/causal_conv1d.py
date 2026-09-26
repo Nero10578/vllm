@@ -12,6 +12,12 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
+# RADIANCE: prefill conv1d channel-block width. 256 (the stock value) gives each lane a
+# 4-byte access and lands at 37% of DRAM bandwidth; 1024 gives a 16-byte access and 82%,
+# and it also defuses the 2**14-byte row pitch the qkvz split() view hands this kernel.
+# Bit-identical either way -- the 4-tap accumulation is per channel.
+_RADIANCE_CONV1D_BLOCKN = 1024
+
 
 @triton.jit(do_not_specialize_on_alignment=["num_cache_lines"])
 def _causal_conv1d_fwd_kernel(  # continuous batching
@@ -752,7 +758,11 @@ def causal_conv1d_fn(
         NP2_STATELEN=np2_statelen,
         # launch_cooperative_grid=True
         BLOCK_M=BLOCK_M,
-        BLOCK_N=256,
+        BLOCK_N=(
+            _RADIANCE_CONV1D_BLOCKN
+            if dim >= 2 * _RADIANCE_CONV1D_BLOCKN
+            else 256
+        ),
         num_stages=2,
         launch_pdl=current_platform.is_arch_support_pdl(),
     )

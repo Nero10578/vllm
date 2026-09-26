@@ -191,6 +191,10 @@ def _get_gcn_arch() -> str:
     """Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
     Called once at module level; result stored in _GCN_ARCH.
     """
+    import os as _os
+    _env = _os.environ.get("RADIANCE_GFX_ARCH") or _os.environ.get("VLLM_ROCM_GCN_ARCH")
+    if _env:
+        return _env
     try:
         return _query_gcn_arch_from_amdsmi()
     except Exception as e:

@@ -67,6 +67,11 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+try:
+    import radiance_gdn as _radiance_gdn
+except Exception:
+    _radiance_gdn = None
+
 # Optional ROCm AITER Triton kernels for the GDN decode path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
 # references are imported here so that they can be called without per-call
@@ -92,7 +97,7 @@ FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
+) -> tuple[str, Literal["triton", "flashinfer", "cutedsl", "aiter"]]:
     """Resolve GDN prefill backend.
 
     FlashInfer's GDN prefill kernel is chosen when:
@@ -115,12 +120,31 @@ def _resolve_gdn_prefill_backend(
     )
     backend = str(backend_cfg).strip().lower()
 
-    if not current_platform.is_cuda():
-        return backend, "triton"
-
     head_k_dim = getattr(
         vllm_config.model_config.hf_text_config, "linear_key_head_dim", None
     )
+
+    # AITER 0.1.20's optimized VK-layout prefill pipeline includes a gfx1201
+    # HIP/WMMA K5 recurrence.  Keep it behind the existing backend selector;
+    # importing the implementation also verifies that the required AITER API
+    # is present rather than treating all AITER releases as equivalent.
+    supports_aiter = False
+    if current_platform.is_rocm() and head_k_dim == 128:
+        try:
+            from aiter.ops.triton.gated_delta_net import (  # noqa: F401
+                chunk_gated_delta_rule_opt_vk,
+            )
+
+            supports_aiter = (
+                rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+            )
+        except (ImportError, AttributeError):
+            supports_aiter = False
+
+    if backend == "aiter" and supports_aiter:
+        return backend, "aiter"
+    if not current_platform.is_cuda():
+        return backend, "triton"
 
     supports_flashinfer = False
     supports_cutedsl = False
@@ -172,6 +196,7 @@ def _log_gdn_backend_decision(
     chosen = {
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
+        "aiter": "AITER HIP/Triton",
         "triton": "Triton/FLA",
     }[active_backend]
     logger.info_once(
@@ -246,7 +271,7 @@ class ChunkGatedDeltaRule(CustomOp):
         backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
         self.gdn_prefill_backend = active_backend
 
-        if backend in ("flashinfer", "cutedsl") and active_backend != backend:
+        if backend in ("flashinfer", "cutedsl", "aiter") and active_backend != backend:
             logger.warning_once(
                 "GDN prefill backend '%s' is selected but cannot use this "
                 "kernel on the current platform. Falling back to Triton/FLA.",
@@ -258,6 +283,8 @@ class ChunkGatedDeltaRule(CustomOp):
             self._forward_method = self.forward_cuda
         elif active_backend == "cutedsl":
             self._forward_method = self.forward_cutedsl
+        elif active_backend == "aiter":
+            self._forward_method = self.forward_aiter
         else:
             self._forward_method = self.forward_native
 
@@ -275,6 +302,7 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
+        aiter_prefill_metadata: object | None = None,
     ):
         o, final_state = fi_chunk_gated_delta_rule(
             q=q,
@@ -307,6 +335,7 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
+        aiter_prefill_metadata: object | None = None,
     ):
         return fla_chunk_gated_delta_rule(
             q=q,
@@ -323,6 +352,46 @@ class ChunkGatedDeltaRule(CustomOp):
             core_attn_out=core_attn_out,
         )
 
+    def forward_aiter(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_offsets: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+        core_attn_out: torch.Tensor | None = None,
+        aiter_prefill_metadata: object | None = None,
+    ):
+        from aiter.ops.triton.gated_delta_net import (
+            chunk_gated_delta_rule_opt_vk,
+        )
+
+        # AITER's VK layout matches vLLM's persistent GDN state layout.  Its
+        # output buffer contract also matches the FLA path used by this layer.
+        return chunk_gated_delta_rule_opt_vk(
+            q=q,
+            k=k,
+            v=v,
+            o=core_attn_out,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            cu_seqlens=cu_seqlens,
+            use_chunk_hip=True,
+            state_dtype=initial_state.dtype,
+            snapshot_dtype=k.dtype,
+            use_exp2=True,
+            prefill_metadata=aiter_prefill_metadata,
+        )
+
     def forward_cutedsl(
         self,
         q: torch.Tensor,
@@ -337,6 +406,7 @@ class ChunkGatedDeltaRule(CustomOp):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
+        aiter_prefill_metadata: object | None = None,
     ):
         from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
             chunk_gated_delta_rule_cutedsl,
@@ -1123,9 +1193,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
 
-        # CuteDSL kernels require metadata
+        # Backend-specific kernels require reusable metadata.
         chunk_indices = None
         chunk_offsets = None
+        aiter_prefill_metadata = None
+        if self.gdn_prefill_backend == "aiter":
+            from aiter.ops.triton.gated_delta_net import (
+                build_gated_delta_rule_prefill_metadata,
+            )
+
+            aiter_prefill_metadata = build_gated_delta_rule_prefill_metadata(
+                [T], cu_seqlens=cu_seqlens, chunk_size=FLA_CHUNK_SIZE
+            )
         if self.gdn_prefill_backend == "cutedsl":
             from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
                 prepare_metadata_cutedsl,
@@ -1146,6 +1225,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_indices=chunk_indices,
                 chunk_offsets=chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
+                aiter_prefill_metadata=aiter_prefill_metadata,
             )
         except Exception:
             logger.warning(
@@ -1266,6 +1346,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata is None:
             self._warmup_prefill_kernels(mixed_qkv, 0)
             return
+
+        # --- RADIANCE all-R4D gated delta net (patch_r4d.py) ---
+        # conv_prep -> kkt_solve -> chunk_scan for a prefill step, conv_update ->
+        # recurrent_update for a speculative decode step. Returns False for any step it
+        # does not cover, which leaves the Triton body below exactly as it was.
+        if _radiance_gdn is not None and _radiance_gdn.ALL:
+            if _radiance_gdn.forward_core_fused(self, mixed_qkv, b, a, core_attn_out):
+                return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
@@ -1517,6 +1605,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
+                aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
             )
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)

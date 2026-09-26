@@ -170,14 +170,9 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
-            A,
-            B,
-            As,
-            Bs,
-            list(self.weight_group_shape),
-            self.config.out_dtype,
-        )
+        # --- gfx1201 custom kernel dispatcher (radiance; patch_radiance_dispatch.py) ---
+        from radiance_kernels import block_scaled_mm as _radiance_block_scaled_mm
+        return _radiance_block_scaled_mm(self, A, B, As, Bs)
 
 
 # TODO we should be able to change the type of block_size to GroupShape

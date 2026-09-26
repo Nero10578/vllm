@@ -427,6 +427,12 @@ def build_attn_metadata(
         seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
+    # radiance (patch_gdn_shared_build.py): scoped to this call, so no cross-step identity
+    # keying is needed -- every group in the loop below sees the same step.
+    _rad_gdn_shared: dict[str, Any] | None = (
+        {} if __import__("os").environ.get("RADIANCE_GDN_SHARED_BUILD", "1") == "1"
+        else None
+    )
     token_to_req_indices: torch.Tensor | None = None
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
     for i in range(num_kv_cache_groups):
@@ -493,6 +499,9 @@ def build_attn_metadata(
                     if model_specific_attn_metadata is not None
                     else {}
                 )
+                # radiance (patch_gdn_shared_build.py): GDN builders share one build.
+                if hasattr(attn_metadata_builder, "_radiance_shared_build"):
+                    attn_metadata_extra_kwargs["_radiance_shared"] = _rad_gdn_shared
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,

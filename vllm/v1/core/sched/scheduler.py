@@ -1994,6 +1994,7 @@ class Scheduler(SchedulerInterface):
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
                 num_rejected = num_draft_tokens - num_accepted
+                self._radiance_dynw_observe(request, num_accepted, num_draft_tokens)
                 # Rejections roll back num_computed_tokens (and, under async
                 # scheduling, num_output_placeholders, which covers the spec
                 # tokens). A stale rejection count predates the preemption
@@ -2424,6 +2425,7 @@ class Scheduler(SchedulerInterface):
             request.spec_token_ids = self.structured_output_manager.validate_tokens(
                 request, spec_token_ids
             )
+            self._radiance_cap_spec_width(request)
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
@@ -3274,3 +3276,50 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
+
+# ---- RADIANCE dynamic verify width (patch_dynwidth.py) --------------------------------------
+import math as _rad_math
+import os as _rad_os
+
+_RAD_DYNW = _rad_os.environ.get("RADIANCE_DYNAMIC_WIDTH", "0") == "1"
+_RAD_DYNW_ALPHA = float(_rad_os.environ.get("RADIANCE_DYNW_ALPHA", "0.35"))
+_RAD_DYNW_MARGIN = int(_rad_os.environ.get("RADIANCE_DYNW_MARGIN", "2"))
+_RAD_DYNW_MIN = int(_rad_os.environ.get("RADIANCE_DYNW_MIN", "2"))
+_RAD_DYNW_MIN_BATCH = int(_rad_os.environ.get("RADIANCE_DYNW_MIN_BATCH", "5"))
+
+
+def _radiance_dynw_observe(self, request, num_accepted, num_draft_tokens):
+    if not _RAD_DYNW or num_draft_tokens <= 0:
+        return
+    # Full acceptance of a capped width is evidence the cap binds; observe one above it so the
+    # EMA can climb back out of its own shadow.
+    obs = float(num_accepted) + (1.0 if num_accepted >= num_draft_tokens else 0.0)
+    ema = getattr(request, "_rad_dynw_ema", None)
+    request._rad_dynw_ema = (
+        obs if ema is None else _RAD_DYNW_ALPHA * obs + (1.0 - _RAD_DYNW_ALPHA) * ema
+    )
+
+
+def _radiance_cap_spec_width(self, request):
+    if not _RAD_DYNW or not request.spec_token_ids:
+        return
+    # The cap only pays where the batch's summed verify rows cross real cost boundaries; below
+    # M ~ 16 the decode GEMMs are weight-stream-bound and M-invariant, so capping a lone stream
+    # (or a pair) saves nothing and can only truncate a token that would have accepted -- the
+    # measured conc-2 dip. Gate the CAP on batch size, never the EMA observation above: history
+    # stays warm at every concurrency, so caps apply instantly the moment a batch forms.
+    if len(self.running) < _RAD_DYNW_MIN_BATCH:
+        return
+    ema = getattr(request, "_rad_dynw_ema", None)
+    if ema is None:
+        return                       # cold start: full width until there is evidence
+    w = int(_rad_math.ceil(ema)) + _RAD_DYNW_MARGIN
+    if w < _RAD_DYNW_MIN:
+        w = _RAD_DYNW_MIN
+    if w < len(request.spec_token_ids):
+        del request.spec_token_ids[w:]
+
+
+Scheduler._radiance_dynw_observe = _radiance_dynw_observe
+Scheduler._radiance_cap_spec_width = _radiance_cap_spec_width

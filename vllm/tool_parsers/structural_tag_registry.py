@@ -81,6 +81,57 @@ SUPPORTED_STRUCTURAL_TAG_MODELS = (
 _VLLM_STRUCTURAL_TAG_REGISTRY: dict[str, StructuralTagBuilder] = {}
 
 
+_QWEN_XML_STRUCTURAL_TAG_MODELS = frozenset(
+    {"qwen_3", "qwen_3_5", "qwen_3_coder"}
+)
+
+
+def _normalize_qwen_open_nested_objects(
+    schema: object,
+    *,
+    is_root: bool,
+) -> None:
+    """Make open nested objects use XGrammar's JSON-braced representation.
+
+    Omitted and explicit-true ``additionalProperties`` are equivalent under
+    JSON Schema.  The explicit form prevents XGrammar 0.2.3's Qwen-XML path
+    from rendering an open nested object as recursively nested parameter tags,
+    which vLLM's flat Qwen argument converter cannot round-trip.
+    """
+    if isinstance(schema, list):
+        for item in schema:
+            _normalize_qwen_open_nested_objects(item, is_root=False)
+        return
+    if not isinstance(schema, dict):
+        return
+
+    is_plain_open_object = (
+        not is_root
+        and schema.get("type") == "object"
+        and "additionalProperties" not in schema
+        and not schema.get("properties")
+        and not schema.get("patternProperties")
+        and not any(key in schema for key in ("$ref", "allOf", "anyOf", "oneOf"))
+    )
+    if is_plain_open_object:
+        # JSON Schema's default is true; spelling it out only selects the
+        # representation that the Qwen parser can faithfully reconstruct.
+        schema["additionalProperties"] = True
+
+    for value in tuple(schema.values()):
+        _normalize_qwen_open_nested_objects(value, is_root=False)
+
+
+def _normalize_qwen_tool_schemas(tools: list[dict[str, object]]) -> None:
+    for tool in tools:
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        parameters = function.get("parameters")
+        if isinstance(parameters, dict):
+            _normalize_qwen_open_nested_objects(parameters, is_root=True)
+
+
 def register_vllm_structural_tag(
     model: str,
 ) -> Callable[[StructuralTagBuilder], StructuralTagBuilder]:
@@ -163,6 +214,8 @@ def get_model_structural_tag(
         return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
+    if model in _QWEN_XML_STRUCTURAL_TAG_MODELS:
+        _normalize_qwen_tool_schemas(dumped_tools)
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
 
     if model in _VLLM_STRUCTURAL_TAG_REGISTRY:

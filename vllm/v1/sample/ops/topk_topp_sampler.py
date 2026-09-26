@@ -436,9 +436,23 @@ def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
     return probs.div(q).argmax(dim=-1).view(-1)
 
 
+_RADIANCE_TOPK_COMPOSITE = (
+    __import__("os").environ.get("RADIANCE_TOPK_COMPOSITE", "1") == "1"
+)
+
+
 def apply_top_k_top_p(
-    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None
+    logits: torch.Tensor, k: torch.Tensor | None, p: torch.Tensor | None,
+    max_top_k: int = 0,
 ) -> torch.Tensor:
+    # radiance (patch_topk_composite.py): when every row's top_k is known (on the CPU) to be
+    # a small cap, the exact mask only needs the top-KCAP candidates. torch.topk is a
+    # multi-block radix select that fills the GPU where the one-program-per-row Triton
+    # kernel cannot: 907 us -> ~0.1 ms at 8-9 rows, measured. See radiance_topk.py.
+    if _RADIANCE_TOPK_COMPOSITE and k is not None and max_top_k > 0:
+        import radiance_topk
+        if max_top_k <= radiance_topk.KCAP:
+            return radiance_topk.apply_top_k_top_p_composite(logits, k, p)
     if p is None and k is None:
         return logits
 

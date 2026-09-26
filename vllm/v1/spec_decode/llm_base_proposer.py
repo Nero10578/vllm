@@ -687,6 +687,8 @@ class SpecDecodeBaseProposer:
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
         for token_index in range(self.num_speculative_tokens - 1):
+            if getattr(self, "_radiance_stop", False):
+                break  # radiance: controller stopped; skip the remaining draft forwards
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.

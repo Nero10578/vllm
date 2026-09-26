@@ -941,6 +941,9 @@ class InputBatch:
             all_random=self.all_random,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
+            # radiance (patch_topk_composite.py): CPU-known bound, no sync. Rows without a
+            # real top-k hold vocab_size in top_k_cpu, disqualifying the composite route.
+            max_top_k=0 if self.no_top_k else int(self.top_k_cpu[:num_reqs].max()),
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             logprob_token_ids=logprob_token_ids_by_index,

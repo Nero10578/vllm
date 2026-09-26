@@ -89,6 +89,14 @@ def load_general_plugins():
     for func in plugins.values():
         func()
 
+    # radiance runtime hooks (env-gated, idempotent; vllm/aiter imported, model not yet loaded)
+    try:
+        import radiance_kernels
+        radiance_kernels.install_all()
+    except Exception as _e:
+        import sys as _s
+        _s.stderr.write(f"[radiance] install_all failed: {_e!r}\n")
+
 
 def load_endpoint_plugins(
     supported_tasks: "tuple[SupportedTask, ...] | None" = None,

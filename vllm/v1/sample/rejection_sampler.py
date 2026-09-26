@@ -575,7 +575,11 @@ def apply_sampling_constraints(
 
     # NOTE(woosuk): `apply_top_k_top_p` uses sorting to calculate the mask,
     # which is slow for large vocab sizes. This may cause performance issues.
-    return apply_top_k_top_p(logits, top_k, top_p)
+    return apply_top_k_top_p(
+        logits, top_k, top_p,
+        # radiance (patch_topk_composite.py)
+        max_top_k=getattr(sampling_metadata, "max_top_k", 0),
+    )
 
 
 def expand_batch_to_tokens(

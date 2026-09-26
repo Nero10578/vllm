@@ -120,7 +120,12 @@ class SamplingStates:
         top_k, top_p = self.get_top_k_top_p(expanded_idx_mapping, idx_mapping_np)
         if top_k is None and top_p is None:
             return logits
-        return apply_top_k_top_p(logits, top_k, top_p)
+        # radiance (patch_topk_composite.py): CPU-known bound, no sync.
+        kmax = 0 if top_k is None else int(self.top_k.np[idx_mapping_np].max())
+        return apply_top_k_top_p(
+            logits, top_k, top_p,
+            max_top_k=0 if kmax >= self.vocab_size else kmax,
+        )
 
     def any_greedy(self, idx_mapping_np: np.ndarray) -> bool:
         return bool(np.any(self.temperature.np[idx_mapping_np] == 0.0))

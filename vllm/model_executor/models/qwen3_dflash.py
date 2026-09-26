@@ -361,6 +361,24 @@ class DFlashQwen3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+_DFLASH_DENSE = (torch.bfloat16, torch.float16, torch.float32)
+
+
+def _dflash_kv_weight_rows(qkv_proj, q_size: int) -> torch.Tensor:
+    """The K/V rows of a qkv projection as a dense compute-dtype matrix."""
+    weight = qkv_proj.weight
+    if weight.dtype in _DFLASH_DENSE:
+        return weight[q_size:]
+    dtype = getattr(qkv_proj, "orig_dtype", torch.bfloat16)
+    eye = torch.eye(
+        qkv_proj.input_size_per_partition, dtype=dtype, device=weight.device
+    )
+    out = qkv_proj(eye)
+    if isinstance(out, tuple):
+        out = out[0]
+    return out[:, q_size:].t().contiguous()
+
+
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
     decoder_layer_cls = DFlashQwen3DecoderLayer
@@ -475,8 +493,14 @@ class DFlashQwen3Model(nn.Module):
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+        self._kv_source_attn = layers_attn
+        if layers_attn[0].qkv_proj.weight.dtype not in _DFLASH_DENSE:
+            # Deferred: a quantized qkv_proj cannot be read until its quant method has processed
+            # the weights, which happens after load_weights returns.
+            self._fused_kv_weight = None
+        else:
+            kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+            self._fused_kv_weight = torch.cat(kv_weights, dim=0)
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
             self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
@@ -548,6 +572,14 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
+        if self._fused_kv_weight is None:
+            self._fused_kv_weight = torch.cat(
+                [
+                    _dflash_kv_weight_rows(a.qkv_proj, a.q_size)
+                    for a in self._kv_source_attn
+                ],
+                dim=0,
+            )
         all_kv_flat = F.linear(
             normed_context_states, self._fused_kv_weight, self._fused_kv_bias
         )

@@ -42,9 +42,20 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         load_config=get_pp_safe_draft_load_config(get_draft_load_config(vllm_config)),
     )
     with set_model_tag("dflash_head"):
-        dflash_model = get_model(
-            vllm_config=draft_vllm_config, model_config=draft_model_config
-        )
+        # --- RADIANCE 4-bit drafter weights (patch_dflash_w4.py) ---
+        try:
+            import radiance_w4 as _radiance_w4
+        except Exception:
+            _radiance_w4 = None
+        if _radiance_w4 is not None:
+            _radiance_w4.begin_draft()
+        try:
+            dflash_model = get_model(
+                vllm_config=draft_vllm_config, model_config=draft_model_config
+            )
+        finally:
+            if _radiance_w4 is not None:
+                _radiance_w4.end_draft()
 
     target_language_model = (
         target_model.get_language_model()
