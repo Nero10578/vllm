@@ -87,6 +87,14 @@ PY="$VENV/bin/python"
 SP="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 echo "site-packages: $SP"
 
+# A venv that already went through the ROCm LLVM dedup has _rocm_sdk_*/lib symlinked
+# into the (root-owned) system ROCm tree. uv can no longer uninstall/reinstall the
+# SDK packages that own those paths, so never run a stack (re)install on such a venv.
+DEDUPED=0
+if [ -L "$SP/_rocm_sdk_libraries/lib" ] || [ -L "$SP/_rocm_sdk_core/lib" ]; then
+  DEDUPED=1
+fi
+
 # -----------------------------------------------------------------------------
 log "ROCm python stack (mode=$STACK_MODE)"
 if [ "$STACK_MODE" = "skip" ]; then
@@ -98,25 +106,32 @@ elif [ "$STACK_MODE" = "auto" ]; then
     || warn "triton/torchvision install returned non-zero"
 else
   # amd-wheel: the proven gfx1201 / ROCm 10 flow.
-  uv pip install --python "$PY" --upgrade pip
-  uv pip install --python "$PY" cmake ninja setuptools-rust wheel pybind11
-  if [ "$SKIP_DEPS" != "1" ]; then
-    [ -d "$ROCM_ROOT/share/amd_smi" ] && uv pip install --python "$PY" "$ROCM_ROOT/share/amd_smi" \
-      || warn "amd_smi not found at $ROCM_ROOT/share/amd_smi"
-    uv pip install --python "$PY" -r "$ROOT/requirements/rocm.txt"
+  if [ "$DEDUPED" = "1" ]; then
+    warn "venv already has the ROCm LLVM dedup symlinks; skipping the torch stack"
+    warn "(re)install so uv does not try to remove root-owned /opt/rocm files."
+    warn "Use RADIANCE_STACK_MODE=skip to silence this."
+    "$PY" -c 'import torch; print("torch", torch.__version__)' || die "torch not importable"
+  else
+    uv pip install --python "$PY" --upgrade pip
+    uv pip install --python "$PY" cmake ninja setuptools-rust wheel pybind11
+    if [ "$SKIP_DEPS" != "1" ]; then
+      [ -d "$ROCM_ROOT/share/amd_smi" ] && uv pip install --python "$PY" "$ROCM_ROOT/share/amd_smi" \
+        || warn "amd_smi not found at $ROCM_ROOT/share/amd_smi"
+      uv pip install --python "$PY" -r "$ROOT/requirements/rocm.txt"
+    fi
+    # AMD's prebuilt gfx1201 wheels. The extras pull the matching precompiled Triton,
+    # so triton is never built from source here.
+    uv pip install --python "$PY" --reinstall \
+        --extra-index-url "$ROCM_WHEEL_INDEX" \
+        "torch[device-${GFX_ARCH}]==${TORCH_VERSION}+rocm10.0.0"
+    uv pip install --python "$PY" --index-url "$ROCM_WHEEL_INDEX" \
+        "torch[device-${GFX_ARCH}]==${TORCH_VERSION}+rocm10.0.0" \
+        "torchvision[device-${GFX_ARCH}]==${TORCHVISION_VERSION}+rocm10.0.0" \
+        "torchaudio==${TORCHAUDIO_VERSION}+rocm10.0.0" || warn "torchvision/torchaudio install returned non-zero"
+    # amd-quark currently circular-imports on vLLM main; the radiance Quark paths are
+    # default-off and guarded, so removing it is safe for non-Quark checkpoints.
+    uv pip uninstall --python "$PY" amd-quark 2>/dev/null || true
   fi
-  # AMD's prebuilt gfx1201 wheels. The extras pull the matching precompiled Triton,
-  # so triton is never built from source here.
-  uv pip install --python "$PY" --reinstall \
-      --extra-index-url "$ROCM_WHEEL_INDEX" \
-      "torch[device-${GFX_ARCH}]==${TORCH_VERSION}+rocm10.0.0"
-  uv pip install --python "$PY" --index-url "$ROCM_WHEEL_INDEX" \
-      "torch[device-${GFX_ARCH}]==${TORCH_VERSION}+rocm10.0.0" \
-      "torchvision[device-${GFX_ARCH}]==${TORCHVISION_VERSION}+rocm10.0.0" \
-      "torchaudio==${TORCHAUDIO_VERSION}+rocm10.0.0" || warn "torchvision/torchaudio install returned non-zero"
-  # amd-quark currently circular-imports on vLLM main; the radiance Quark paths are
-  # default-off and guarded, so removing it is safe for non-Quark checkpoints.
-  uv pip uninstall --python "$PY" amd-quark 2>/dev/null || true
 fi
 
 # -----------------------------------------------------------------------------
@@ -124,9 +139,14 @@ if [ "$SKIP_LLVM_LINK" != "1" ] && [ "$STACK_MODE" = "amd-wheel" ]; then
   log "LLVM library dedup (ROCm 10 SDK vs python _rocm_sdk_* copies)"
   # ROCm 10 ships the same libraries in /opt/rocm and in the python _rocm_sdk_*
   # packages; the duplicate LLVM crashes triton's spirv-expand-step. Point the
-  # python copies at the system tree.
+  # python copies at the system tree. Idempotent: an already-correct link is left
+  # untouched. Run this only once per venv and never (re)install the stack after.
   for d in _rocm_sdk_core _rocm_sdk_libraries; do
-    if [ -d "$SP/$d" ]; then
+    if [ -d "$SP/$d" ] || [ -L "$SP/$d/lib" ]; then
+      if [ "$(readlink "$SP/$d/lib" 2>/dev/null)" = "$ROCM_ROOT/lib" ]; then
+        echo "$d/lib already linked -> $ROCM_ROOT/lib"
+        continue
+      fi
       rm -rf "$SP/$d/lib" "$SP/$d/lib64"
       ln -sfn "$ROCM_ROOT/lib" "$SP/$d/lib"
       echo "linked $SP/$d/lib -> $ROCM_ROOT/lib"
