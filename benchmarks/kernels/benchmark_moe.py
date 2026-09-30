@@ -919,6 +919,17 @@ def main(args: argparse.Namespace):
                 "field (AWQ/GPTQ) or 'config_groups.*.weights.group_size' "
                 "(compressed-tensors)."
             )
+        # Match the WNA16 loader (moe_wna16.py): halve the group size until it
+        # divides the per-rank intermediate size and the hidden size. A model
+        # like GLM-4.7 (moe_intermediate_size=1536, TP=8 -> 192) with
+        # group_size=128 would otherwise index one group past the end of the
+        # synthetic scales and fault the gptq_awq kernel.
+        intermediate_size_per_partition = shard_intermediate_size // 2
+        while (
+            intermediate_size_per_partition % group_size
+            or hidden_size % group_size
+        ):
+            group_size //= 2
         # For int4_w4a16, block_shape = [0, group_size]
         # block_shape[0]=0 means no block quantization on N dimension
         block_quant_shape = [0, group_size]

@@ -232,7 +232,10 @@ def fused_moe_kernel_gptq_awq(
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
         )
-        b = tl.load(b_ptrs)
+        # Mask the weight load along K as well. Without this, a BLOCK_SIZE_K
+        # that does not divide K makes the final tile read past the end of B
+        # (and of B_scale), which raises an uncatchable GPU memory fault.
+        b = tl.load(b_ptrs, mask=k_mask, other=k_other)
         if use_int4_w4a16:
             b = (b >> b_shifter) & 0xF
 
