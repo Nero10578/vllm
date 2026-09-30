@@ -238,6 +238,14 @@ class AutoGPTQConfig(QuantizationConfig):
         if isinstance(layer, RoutedExperts):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
+            # Honor negative (``-:``) dynamic rules before any MoE backend
+            # fallback. Otherwise excluded layers such as the MTP head are still
+            # built quantized when AutoGPTQ falls back to Moe WNA16 kernels,
+            # which leaves them with packed (``*_qweight``) parameters that the
+            # hand-rolled MTP loader cannot map.
+            if get_dynamic_override(deepcopy(self), layer_name=prefix) == False:  # noqa: E712
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+
             if not check_moe_marlin_supports_layer(
                 layer, self.group_size, allow_tile_padding=True
             ):
