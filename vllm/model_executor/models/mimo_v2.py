@@ -166,7 +166,7 @@ class MiMoV2MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
         self.gate.e_score_correction_bias = nn.Parameter(
-            torch.empty(config.n_routed_experts, dtype=self.gate.out_dtype)
+            torch.empty(config.n_routed_experts, dtype=torch.float32)
         )
 
         self.experts = FusedMoEFactory(
