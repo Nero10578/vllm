@@ -122,7 +122,7 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         return [WNA16MoEBackend.XPU]
 
     return [
-        # Native HIP kernel, gated on gfx1100 by _supports_current_device().
+        # Native HIP kernel, gated on gfx1100/gfx12x by _supports_current_device().
         WNA16MoEBackend.RDNA3,
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,

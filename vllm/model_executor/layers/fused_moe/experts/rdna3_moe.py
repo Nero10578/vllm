@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused MoE W4A16 experts on the RDNA3 (gfx1100) HIP kernel.
+"""Fused MoE W4A16 experts on the RDNA (gfx11/gfx12x) HIP kernel.
 
 ``moe_gptq_gemm_rdna3`` is a single HIP kernel launch per GEMM that handles
 expert routing + W4A16 dequant + dot product with atomic output accumulation.
@@ -39,21 +39,21 @@ from vllm.platforms import current_platform
 
 
 def rdna3_moe_kernel_available() -> bool:
-    """Whether the fused RDNA3 MoE HIP kernel is built into this binary."""
+    """Whether the fused RDNA MoE W4A16 HIP kernel is built into this binary."""
     if not current_platform.is_rocm():
         return False
 
-    from vllm.platforms.rocm import on_gfx1100
+    from vllm.platforms.rocm import on_gfx1100, on_gfx12x
 
     return (
-        on_gfx1100()
+        (on_gfx1100() or on_gfx12x())
         and hasattr(torch.ops, "_rocm_C")
         and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3")
     )
 
 
 class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
-    """W4A16 experts backed by ``moe_gptq_gemm_rdna3`` (gfx1100).
+    """W4A16 experts backed by ``moe_gptq_gemm_rdna3`` (gfx11/gfx12x).
 
     Both GEMMs accumulate atomically, so their destinations are zeroed first.
     The second GEMM is given ``output_topk``, which makes it reduce over the

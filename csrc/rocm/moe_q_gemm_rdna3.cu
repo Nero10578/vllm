@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// Fused MoE W4A16 GPTQ kernel for RDNA3 (gfx1100).
+// Fused MoE W4A16 GPTQ kernel for RDNA3 (gfx1100) and RDNA4 (gfx1200/gfx1201).
 //
-// Combines expert routing (sorted_token_ids / expert_ids) with the RDNA3
+// Combines expert routing (sorted_token_ids / expert_ids) with the RDNA
 // W4A16 dequant+dot from q_gemm_rdna3.cu into a single kernel launch.
 // Each block processes BLOCK_SIZE_M tokens assigned to one expert, covering
 // a tile of N output columns and K input positions.
@@ -27,7 +27,11 @@
 
 #include "qdq_4_rdna3.cuh"
 
-#if defined(__HIPCC__) && defined(__gfx1100__)
+// RDNA3 (gfx11) and RDNA4 (gfx12x) both use 32-wide wavefronts and provide the
+// V_DOT2 dequant path this kernel is built on (see skinny_gemms_int4.cu). The
+// CDNA-classified gfx1250 is excluded by the build, not by this guard.
+#if defined(__HIPCC__) && \
+    (defined(__gfx1100__) || defined(__gfx1200__) || defined(__gfx1201__))
   #define __HIP__RDNA3__
 #endif
 

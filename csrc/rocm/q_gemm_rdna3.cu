@@ -44,7 +44,13 @@
 
 #include "qdq_4_rdna3.cuh"
 
-#if defined(__HIPCC__) && defined(__gfx1100__)
+// RDNA3 (gfx11) and RDNA4 (gfx12x) both use 32-wide wavefronts and provide the
+// V_DOT2 dequant path this kernel is built on (see skinny_gemms_int4.cu). The
+// CDNA-classified gfx1250 is excluded by the build, not by this guard. The
+// WMMA prefill path (q_gemm_rdna3_wmma.cu) remains gfx1100-only, so the
+// dispatch below is restricted to gfx11 at runtime.
+#if defined(__HIPCC__) && \
+    (defined(__gfx1100__) || defined(__gfx1200__) || defined(__gfx1201__))
   #define __HIP__RDNA3__
 #endif
 
@@ -640,11 +646,23 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
                                    torch::Tensor b_qzeros,
                                    torch::Tensor b_scales, bool use_v2_format);
 
+namespace {
+// The WMMA prefill path is gfx11-only; on gfx12x the scalar kernel below runs
+// for every M. Cached because gcnArchName never changes within a process.
+bool on_gfx11_device() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    return std::string(dprops->gcnArchName).find("gfx11") != std::string::npos;
+  }();
+  return result;
+}
+}  // namespace
+
 torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
                               bool use_v2_format) {
-  if (a.dim() == 2 && b_q_weight.dim() == 2 && a.size(1) % 16 == 0 &&
-      b_q_weight.size(1) % 16 == 0 &&
+  if (on_gfx11_device() && a.dim() == 2 && b_q_weight.dim() == 2 &&
+      a.size(1) % 16 == 0 && b_q_weight.size(1) % 16 == 0 &&
       ((a.scalar_type() == torch::kBFloat16 && a.size(0) >= 16) ||
        (a.scalar_type() == torch::kHalf && a.size(0) >= 64))) {
     return gptq_gemm_rdna3_wmma(a, b_q_weight, b_qzeros, b_scales,

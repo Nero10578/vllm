@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Correctness tests for the ROCm RDNA3 fused MoE W4A16 HIP kernel (gfx1100).
+"""Correctness tests for the ROCm RDNA fused MoE W4A16 HIP kernel
+(gfx1100 / gfx1200 / gfx1201).
 
 Tests ``moe_gptq_gemm_rdna3`` against the dense ``gptq_gemm_rdna3`` as
 reference: builds RDNA3-format weights (shuffled int32, synthesized qzeros),
@@ -35,18 +36,18 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (  # noqa:
 from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E402
     pack_quantized_values_into_int32,
 )
-from vllm.platforms.rocm import on_gfx1100  # noqa: E402
+from vllm.platforms.rocm import on_gfx1100, on_gfx12x  # noqa: E402
 from vllm.scalar_type import scalar_types  # noqa: E402
 
 device = "cuda"
 
-gfx1100_only = pytest.mark.skipif(
+rdna_only = pytest.mark.skipif(
     not (
-        on_gfx1100()
+        (on_gfx1100() or on_gfx12x())
         and hasattr(torch.ops, "_rocm_C")
         and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3")
     ),
-    reason="Requires gfx1100 with moe_gptq_gemm_rdna3 op",
+    reason="Requires gfx1100/gfx12x with moe_gptq_gemm_rdna3 op",
 )
 
 # Model configurations: real K/N/top_k/group_size dims, E capped at 16 to
@@ -95,7 +96,7 @@ def _make_qzeros(E, groups, N):
     return qz.unsqueeze(0).expand(E, -1, -1).contiguous()
 
 
-@gfx1100_only
+@rdna_only
 @pytest.mark.parametrize("E, K, N_inter, top_k, group_size", MODEL_CONFIGS)
 @pytest.mark.parametrize("M", NUM_TOKENS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -157,7 +158,7 @@ def test_fused_moe_w1_matches_dense(
     )
 
 
-@gfx1100_only
+@rdna_only
 @pytest.mark.parametrize("E, K, N_inter, top_k, group_size", MODEL_CONFIGS)
 @pytest.mark.parametrize("M", NUM_TOKENS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -223,7 +224,7 @@ def test_fused_moe_output_topk_reduces(E, K, N_inter, top_k, group_size, M, dtyp
     )
 
 
-@gfx1100_only
+@rdna_only
 @pytest.mark.parametrize("E, K, N_inter, top_k, group_size", MODEL_CONFIGS)
 @pytest.mark.parametrize("M", NUM_TOKENS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -322,7 +323,7 @@ def test_full_moe_e2e(E, K, N_inter, top_k, group_size, M, dtype):
     )
 
 
-@gfx1100_only
+@rdna_only
 def test_expert_id_minus_one():
     """Kernel handles expert_id == -1 (expert parallelism) without crash."""
     # Qwen3-30B-A3B dims (E capped for memory)

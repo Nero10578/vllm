@@ -1514,9 +1514,22 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_SKINNY_GEMMS")
   endif()
 
+  # RDNA W4A16 GPTQ kernels. q_gemm_rdna3.cu (scalar) and moe_q_gemm_rdna3.cu
+  # build for RDNA3 (gfx1100) and RDNA4 (gfx1200/gfx1201); both use the wave32
+  # V_DOT2 dequant path. q_gemm_rdna3_wmma.cu is gfx11-only (empty stub on
+  # gfx12x, and its op registration is gfx1100-gated). gfx1250 is CDNA and
+  # never gets these files.
   set(VLLM_ROCM_HAS_GFX1100 OFF)
   if(VLLM_GPU_ARCHES MATCHES "gfx1100")
     set(VLLM_ROCM_HAS_GFX1100 ON)
+  endif()
+
+  set(VLLM_ROCM_HAS_GFX12X OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx1200" OR VLLM_GPU_ARCHES MATCHES "gfx1201")
+    set(VLLM_ROCM_HAS_GFX12X ON)
+  endif()
+
+  if(VLLM_ROCM_HAS_GFX1100 OR VLLM_ROCM_HAS_GFX12X)
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/q_gemm_rdna3.cu"
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
@@ -1541,6 +1554,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  endif()
+
+  if(VLLM_ROCM_HAS_GFX1100 OR VLLM_ROCM_HAS_GFX12X)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA_W4A16)
   endif()
 endif()
 
