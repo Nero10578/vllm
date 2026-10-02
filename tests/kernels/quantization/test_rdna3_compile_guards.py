@@ -53,6 +53,15 @@ rdna_only = pytest.mark.skipif(
     reason="Requires RDNA (gfx1100/gfx1200/gfx1201) hardware",
 )
 
+wmma12x_only = pytest.mark.skipif(
+    not (
+        on_gfx12x()
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna4_wmma")
+    ),
+    reason="Requires gfx12x with moe_gptq_gemm_rdna4_wmma op",
+)
+
 not_rdna = pytest.mark.skipif(
     on_gfx1100() or on_gfx12x(),
     reason="This test verifies non-RDNA builds — skip on RDNA",
@@ -60,14 +69,16 @@ not_rdna = pytest.mark.skipif(
 
 # Scalar W4A16 kernels: built for gfx1100 and gfx12x.
 RDNA_SCALAR_OPS = ["gptq_gemm_rdna3", "moe_gptq_gemm_rdna3"]
-# WMMA prefill path: gfx1100 only.
+# WMMA prefill paths: dense on gfx1100, fused MoE on gfx12x.
 RDNA_WMMA_OPS = ["gptq_gemm_rdna3_wmma"]
-RDNA3_OPS = RDNA_SCALAR_OPS + RDNA_WMMA_OPS
+RDNA4_WMMA_OPS = ["moe_gptq_gemm_rdna4_wmma"]
+RDNA3_OPS = RDNA_SCALAR_OPS + RDNA_WMMA_OPS + RDNA4_WMMA_OPS
 RDNA3_CU_FILES = [
     "q_gemm_rdna3.cu",
     "q_gemm_rdna3_wmma.cu",
     "moe_q_gemm_rdna3.cu",
 ]
+RDNA4_CU_FILES = ["moe_q_gemm_rdna4_wmma.cu"]
 
 
 def _find_repo_root() -> Path | None:
@@ -148,6 +159,18 @@ def test_wmma_op_registered_on_gfx1100(op_name):
     assert hasattr(torch.ops._rocm_C, op_name), (
         f"_rocm_C.{op_name} not registered on gfx1100 — "
         "check torch_bindings.cpp #ifdef VLLM_ROCM_GFX1100"
+    )
+
+
+@wmma12x_only
+@pytest.mark.parametrize("op_name", RDNA4_WMMA_OPS)
+def test_rdna4_wmma_op_registered_on_gfx12x(op_name):
+    """The gfx12 WMMA MoE op is registered on gfx1200/gfx1201."""
+    assert hasattr(torch.ops, "_rocm_C"), "_rocm_C module not loaded"
+    assert hasattr(torch.ops._rocm_C, op_name), (
+        f"_rocm_C.{op_name} not registered on gfx12x — "
+        "check CMakeLists.txt VLLM_ROCM_HAS_GFX12X and "
+        "torch_bindings.cpp #ifdef VLLM_ROCM_RDNA4_WMMA"
     )
 
 
@@ -266,6 +289,22 @@ class TestCMakeGuards:
                         f"would compile RDNA code. Line: {line.strip()}"
                     )
 
+        # The gfx12-only WMMA MoE kernel must be inside the gfx12x conditional.
+        for cu_file in RDNA4_CU_FILES:
+            assert cu_file in cmake, f"{cu_file} not found in CMakeLists.txt"
+
+            in_gfx12x_block = False
+            for line in lines:
+                if "if(VLLM_ROCM_HAS_GFX12X)" in line:
+                    in_gfx12x_block = True
+                if in_gfx12x_block and line.strip() == "endif()":
+                    in_gfx12x_block = False
+                if cu_file in line:
+                    assert in_gfx12x_block, (
+                        f"{cu_file} is listed OUTSIDE the gfx12x "
+                        f"conditional in CMakeLists.txt. Line: {line.strip()}"
+                    )
+
     def test_compile_definition_only_for_gfx1100(self):
         """VLLM_ROCM_GFX1100 compile definition must be conditional."""
         cmake = self._read_cmake()
@@ -302,28 +341,30 @@ class TestTorchBindingsGuards:
         lines = src.splitlines()
 
         guard: str | None = None
-        rdna3_lines_outside = []
+        rdna_lines_outside = []
 
         for i, line in enumerate(lines, 1):
             if "#ifdef VLLM_ROCM_RDNA_W4A16" in line:
                 guard = "VLLM_ROCM_RDNA_W4A16"
             elif "#ifdef VLLM_ROCM_GFX1100" in line:
                 guard = "VLLM_ROCM_GFX1100"
+            elif "#ifdef VLLM_ROCM_RDNA4_WMMA" in line:
+                guard = "VLLM_ROCM_RDNA4_WMMA"
             elif line.strip() == "#endif":
                 guard = None
 
             if (
-                "rdna3" in line.lower()
+                ("rdna3" in line.lower() or "rdna4" in line.lower())
                 and not line.strip().startswith("//")
                 and guard is None
             ):
-                rdna3_lines_outside.append((i, line.strip()))
+                rdna_lines_outside.append((i, line.strip()))
 
-        assert not rdna3_lines_outside, (
+        assert not rdna_lines_outside, (
             "RDNA op references found OUTSIDE an RDNA guard "
-            "(VLLM_ROCM_RDNA_W4A16 / VLLM_ROCM_GFX1100) in "
-            "torch_bindings.cpp — these would break CDNA builds:\n"
-            + "\n".join(f"  L{n}: {s}" for n, s in rdna3_lines_outside)
+            "(VLLM_ROCM_RDNA_W4A16 / VLLM_ROCM_GFX1100 / VLLM_ROCM_RDNA4_WMMA) "
+            "in torch_bindings.cpp — these would break CDNA builds:\n"
+            + "\n".join(f"  L{n}: {s}" for n, s in rdna_lines_outside)
         )
 
     def test_no_unconditional_rdna3_includes(self):

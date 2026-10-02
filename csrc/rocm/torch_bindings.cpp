@@ -79,6 +79,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
 #endif
 
+#ifdef VLLM_ROCM_RDNA4_WMMA
+  // gfx12 WMMA prefill path for the fused MoE W4A16 kernel.
+  rocm_ops.def(
+      "moe_gptq_gemm_rdna4_wmma(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor b_qzeros, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_gptq_gemm_rdna4_wmma", torch::kCUDA,
+                &moe_gptq_gemm_rdna4_wmma);
+#endif
+
   // Custom attention op
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.

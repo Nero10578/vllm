@@ -1536,6 +1536,12 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/moe_q_gemm_rdna3.cu")
   endif()
 
+  # gfx12 (RDNA4) WMMA fused MoE prefill kernel; gfx1200/gfx1201 only.
+  if(VLLM_ROCM_HAS_GFX12X)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/moe_q_gemm_rdna4_wmma.cu")
+  endif()
+
   define_extension_target(
     _rocm_C
     DESTINATION vllm
@@ -1558,6 +1564,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_ROCM_HAS_GFX1100 OR VLLM_ROCM_HAS_GFX12X)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA_W4A16)
+  endif()
+
+  if(VLLM_ROCM_HAS_GFX12X)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA4_WMMA)
   endif()
 endif()
 

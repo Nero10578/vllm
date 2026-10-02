@@ -5,6 +5,12 @@
 ``moe_gptq_gemm_rdna3`` is a single HIP kernel launch per GEMM that handles
 expert routing + W4A16 dequant + dot product with atomic output accumulation.
 
+On gfx12x, larger batches (``M >= _RDNA4_WMMA_MIN_M``) use
+``moe_gptq_gemm_rdna4_wmma`` instead: the same routing/epilogue, but with
+16x16x16 WMMA matrix cores and a full 16-row token block (``block_size_m=16``).
+Decode stays on the scalar kernel, where per-expert M is too small to fill a
+WMMA tile.
+
 Weight format (per expert, same as the dense RDNA3 W4A16 kernel):
   - Packed int32 ``[E, K/8, N]`` with exllama shuffle
   - Scales ``[E, groups, N]`` in activation dtype
@@ -49,6 +55,26 @@ def rdna3_moe_kernel_available() -> bool:
         (on_gfx1100() or on_gfx12x())
         and hasattr(torch.ops, "_rocm_C")
         and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3")
+    )
+
+
+# Minimum token count before the gfx12 WMMA prefill kernel pays off. Below
+# this, per-expert M is too small to fill a 16-row WMMA tile and the scalar
+# kernel (block_size_m 1/4) wins.
+_RDNA4_WMMA_MIN_M = 32
+
+
+def rdna4_wmma_moe_kernel_available() -> bool:
+    """Whether the gfx12 WMMA fused MoE W4A16 kernel is built into this binary."""
+    if not current_platform.is_rocm():
+        return False
+
+    from vllm.platforms.rocm import on_gfx12x
+
+    return (
+        on_gfx12x()
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna4_wmma")
     )
 
 
@@ -178,8 +204,11 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         gate_up_out = scratch[: rows * gate_up].view(rows, gate_up)
         act_out = scratch[rows * gate_up : rows * (gate_up + act_n)].view(rows, act_n)
 
-        # BLOCK_SIZE_M=1 for decode (no padding waste), 4 for prefill.
-        block_size_m = 1 if M <= 4 else 4
+        # Decode (M <= 4) uses block_size_m=1 (no padding waste). Larger
+        # batches use the gfx12 WMMA kernel with a full 16-row tile when it is
+        # available, otherwise the scalar kernel with block_size_m=4.
+        use_wmma = rdna4_wmma_moe_kernel_available() and M >= _RDNA4_WMMA_MIN_M
+        block_size_m = 16 if use_wmma else (1 if M <= 4 else 4)
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids,
             block_size_m,
@@ -197,8 +226,12 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         topk_weights_f32 = topk_weights.reshape(-1).float()
         no_topk_weights = self._empty_topk_weights
 
+        gemm = (
+            ops.moe_gptq_gemm_rdna4_wmma if use_wmma else ops.moe_gptq_gemm_rdna3
+        )
+
         gate_up_out.zero_()
-        ops.moe_gptq_gemm_rdna3(
+        gemm(
             hidden_states,
             gate_up_out,
             w1,
@@ -218,7 +251,7 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         # output_topk=top_k makes the kernel accumulate into out[token_id],
         # fusing the top-k reduction into the atomic write-back.
         output.zero_()
-        ops.moe_gptq_gemm_rdna3(
+        gemm(
             act_out,
             output,
             w2,

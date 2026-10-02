@@ -360,3 +360,109 @@ def test_expert_id_minus_one():
 
     # Output should remain zero (expert skipped)
     assert torch.equal(out, torch.zeros_like(out))
+
+
+wmma_only = pytest.mark.skipif(
+    not (
+        on_gfx12x()
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna4_wmma")
+    ),
+    reason="Requires gfx12x with moe_gptq_gemm_rdna4_wmma op",
+)
+
+
+@wmma_only
+@rdna_only
+@pytest.mark.parametrize("E, K, N_inter, top_k, group_size", MODEL_CONFIGS)
+@pytest.mark.parametrize("M", [16, 64, 256, 512])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_wmma_moe_matches_scalar(E, K, N_inter, top_k, group_size, M, dtype):
+    """The gfx12 WMMA MoE GEMM (block_size_m=16) matches the scalar kernel.
+
+    Cross-checks the 16x16x16 fragment layout / dequant against the already
+    validated scalar path on identical weights and routing.
+    """
+    N = N_inter
+    groups = K // group_size
+
+    torch.manual_seed(99)
+    x = torch.randn(M * top_k, K, dtype=dtype, device=device)
+    w = _make_packed_weights(E, K, N)
+    ws = _make_scales(E, groups, N, dtype)
+    wz = _make_qzeros(E, groups, N)
+    topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
+    topk_w = torch.softmax(torch.randn(M, top_k, device=device), dim=-1).float()
+
+    def run(op, block_size_m):
+        si, ei, ntp = moe_align_block_size(topk_ids, block_size_m, E)
+        out = torch.zeros(M, N, dtype=dtype, device=device)
+        op(
+            x,
+            out,
+            w,
+            ws,
+            wz,
+            topk_w.view(-1),
+            si,
+            ei,
+            ntp,
+            1,
+            block_size_m,
+            True,
+            top_k,
+        )
+        return out
+
+    ref = run(ops.moe_gptq_gemm_rdna3, 1)
+    got = run(ops.moe_gptq_gemm_rdna4_wmma, 16)
+
+    atol = 1.0 if dtype == torch.bfloat16 else 0.1
+    assert torch.allclose(got, ref, atol=atol, rtol=0.01), (
+        f"max diff: {(got - ref).abs().max().item()}"
+    )
+
+
+@wmma_only
+@rdna_only
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_wmma_moe_w1_direct_store(dtype):
+    """WMMA w1-style GEMM (output_topk=0, direct store) matches the scalar op."""
+    E, K, N_gate_up, top_k, group_size = 16, 2048, 768, 8, 32
+    M = 128
+    groups = K // group_size
+
+    torch.manual_seed(5)
+    x = torch.randn(M, K, dtype=dtype, device=device)
+    w = _make_packed_weights(E, K, N_gate_up)
+    ws = _make_scales(E, groups, N_gate_up, dtype)
+    wz = _make_qzeros(E, groups, N_gate_up)
+    topk_ids = torch.randint(0, E, (M, top_k), device=device, dtype=torch.int32)
+
+    def run(op, block_size_m):
+        si, ei, ntp = moe_align_block_size(topk_ids, block_size_m, E)
+        out = torch.zeros(M * top_k, N_gate_up, dtype=dtype, device=device)
+        op(
+            x,
+            out,
+            w,
+            ws,
+            wz,
+            torch.empty(0, device=device),
+            si,
+            ei,
+            ntp,
+            top_k,
+            block_size_m,
+            False,
+            0,
+        )
+        return out
+
+    ref = run(ops.moe_gptq_gemm_rdna3, 1)
+    got = run(ops.moe_gptq_gemm_rdna4_wmma, 16)
+
+    atol = 1.0 if dtype == torch.bfloat16 else 0.1
+    assert torch.allclose(got, ref, atol=atol, rtol=0.01), (
+        f"max diff: {(got - ref).abs().max().item()}"
+    )
