@@ -1515,7 +1515,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   # RDNA W4A16 GPTQ kernels. q_gemm_rdna3.cu (scalar) and moe_q_gemm_rdna3.cu
-  # build for RDNA3 (gfx1100) and RDNA4 (gfx1200/gfx1201); both use the
+  # build for RDNA3 (gfx1100) and RDNA4 (gfx1200/gfx1201); both use the wave32
   # V_DOT2 dequant path. q_gemm_rdna3_wmma.cu is gfx11-only (empty stub on
   # gfx12x, and its op registration is gfx1100-gated). gfx1250 is CDNA and
   # never gets these files.
@@ -1540,14 +1540,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_ROCM_HAS_GFX12X)
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/moe_q_gemm_rdna4_wmma.cu")
-
-    # The scalar MoE kernel is a decode DMMV; the RDNA4 reference guide measures
-    # wave64 faster than wave32 for that regime. This source contains only that
-    # kernel (the WMMA kernels live in other files and must stay wave32), so a
-    # per-source wave64 flag is safe. If -mwavefrontsize64 is rejected, use
-    # "-Xclang -target-feature -Xclang +wavefrontsize64".
-    set_source_files_properties("csrc/rocm/moe_q_gemm_rdna3.cu"
-      PROPERTIES COMPILE_OPTIONS "-mwavefrontsize64")
   endif()
 
   define_extension_target(

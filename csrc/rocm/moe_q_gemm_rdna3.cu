@@ -504,11 +504,8 @@ void launch_moe_gemm_q4(
 // Pick the smallest wave-multiple THREADS_X whose 4-column N tile covers
 // size_n, so small-N GEMMs (w1's 2*inter) don't idle most of the block. The
 // WMMA MoE kernel needs no such fix: its 64-column tile divides 384 exactly.
-// This file is compiled wave64 (see CMakeLists.txt), so THREADS_X must be a
-// multiple of 64; that rules out the exact 96-thread N=384 tile (tile 512,
-// 75% active instead of 100%).
 inline int pick_threads_x(int size_n) {
-  if (size_n <= 384) return 128;  // N tile 512
+  if (size_n <= 384) return 96;   // N tile 384
   if (size_n <= 768) return 192;  // N tile 768
   return 256;                     // N tile 1024
 }
@@ -569,8 +566,8 @@ void dispatch_moe_gemm_q4(
     int expert_weight_stride, int expert_scales_stride, int expert_zeros_stride,
     bool mul_topk_weight, int output_topk, cudaStream_t stream) {
   switch (pick_threads_x(size_n)) {
-    case 128:
-      dispatch_block_size_m<T, 128>(
+    case 96:
+      dispatch_block_size_m<T, 96>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
           size_k, groups, top_k, block_size_m, expert_weight_stride,
