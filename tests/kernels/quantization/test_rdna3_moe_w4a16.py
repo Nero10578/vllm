@@ -58,6 +58,9 @@ MODEL_CONFIGS = [
     pytest.param(16, 2048, 768, 8, 32, id="Qwen3-30B-A3B"),
     # Qwen3.6-35B-A3B-GPTQ-W4A16-G32 dims (E capped)
     pytest.param(16, 2048, 512, 8, 32, id="Qwen3.6-35B-A3B"),
+    # GLM-4.7 TP8 w1: 2*inter_per_rank = 384 exercises the small-N path
+    # (THREADS_X=96, N tile 384).
+    pytest.param(16, 2048, 384, 8, 64, id="GLM-4.7-TP8-w1"),
 ]
 
 # Token counts: decode (1), small batch (4), medium (16), prefill (64)

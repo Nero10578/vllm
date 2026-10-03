@@ -11,9 +11,12 @@
 // Weight format: same as the dense kernel — [E, K/8, N] uint32 shuffled,
 // [E, groups, N] scales, [E, groups, N/8] packed zeros.
 //
-// Design: THREADS_X=256 (8 waves on wave32), BLOCK_KN_SIZE=256, each thread
-// handles 4 N columns. Output via 64-bit packed CAS atomic-add directly to
-// the pre-zeroed output tensor (no FP32 scratch buffer).
+// Design: BLOCK_KN_SIZE=256 K positions staged into LDS per block; each thread
+// handles 4 N columns. THREADS_X is a template parameter so the N tile
+// (THREADS_X * 4) can shrink for small-N GEMMs (e.g. w1's 2*inter): with 256
+// threads a 384-wide w1 wastes 160/256 threads. Staging is strided, so
+// THREADS_X need not equal BLOCK_KN_SIZE. Output via 64-bit packed CAS
+// atomic-add directly to the pre-zeroed output tensor (no FP32 scratch).
 
 #include <cstdint>
 
@@ -39,7 +42,6 @@ namespace vllm {
 namespace moe_gptq_rdna3 {
 
 #define BLOCK_KN_SIZE 256
-#define THREADS_X 256
 
 #if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
 
@@ -131,7 +133,7 @@ __forceinline__ __device__ void load4_scales(const T* scales_row, int n,
 // Fused MoE kernel.
 // ---------------------------------------------------------------------------
 
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, int BLOCK_SIZE_M, int THREADS_X>
 __global__ void moe_gemm_q4_kernel_rdna3(
     const T* __restrict__ a,                  // [size_m, size_k] or [M*topk, K]
     T* __restrict__ c,                        // [M*topk, size_n] pre-zeroed
@@ -155,7 +157,7 @@ __global__ void moe_gemm_q4_kernel_rdna3(
     const int output_topk) {  // >0: reduce output by token_id/output_topk
   const int t = threadIdx.x;
   const int token_block = blockIdx.x;
-  const int offset_n = blockIdx.y * BLOCK_KN_SIZE * 4;
+  const int offset_n = blockIdx.y * THREADS_X * 4;
   const int offset_k = blockIdx.z * BLOCK_KN_SIZE;
   const int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
   const int n = offset_n + t * 4;
@@ -177,8 +179,9 @@ __global__ void moe_gemm_q4_kernel_rdna3(
   constexpr int LDS_PAD = 8;
   __shared__ T block_a[BLOCK_SIZE_M][BLOCK_KN_SIZE + LDS_PAD];
 
-  static_assert(BLOCK_KN_SIZE == THREADS_X,
-                "BLOCK_KN_SIZE must equal THREADS_X");
+  static_assert(THREADS_X % 32 == 0, "THREADS_X must be a multiple of 32");
+  static_assert(THREADS_X <= BLOCK_KN_SIZE,
+                "THREADS_X must not exceed BLOCK_KN_SIZE");
 
   // For bf16 M=1, we can skip LDS and read A from global (same as dense).
   // fp16 always needs LDS due to the dot22_8_f indexing pattern.
@@ -187,18 +190,21 @@ __global__ void moe_gemm_q4_kernel_rdna3(
   const int offset_m_base = token_block * BLOCK_SIZE_M;
 
   if constexpr (USE_LDS_A) {
-    if (offset_k + t < end_k) {
   #pragma unroll
-      for (int m = 0; m < BLOCK_SIZE_M; ++m) {
-        int32_t token_id = sorted_token_ids[offset_m_base + m];
-        int token_row = token_id / top_k;
-        T av;
-        if (token_row < size_m) {
-          av = a[(int64_t)token_row * size_k + offset_k + t];
-        } else {
-          av = tzero<T>();
+    for (int i = t; i < BLOCK_KN_SIZE; i += THREADS_X) {
+      if (offset_k + i < end_k) {
+  #pragma unroll
+        for (int m = 0; m < BLOCK_SIZE_M; ++m) {
+          int32_t token_id = sorted_token_ids[offset_m_base + m];
+          int token_row = token_id / top_k;
+          T av;
+          if (token_row < size_m) {
+            av = a[(int64_t)token_row * size_k + offset_k + i];
+          } else {
+            av = tzero<T>();
+          }
+          block_a[m][i] = av;
         }
-        block_a[m][t] = av;
       }
     }
     __syncthreads();
@@ -460,7 +466,7 @@ __global__ void moe_gemm_q4_kernel_rdna3(
 
 #else  // non-RDNA3: empty stub for symbol parity
 
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, int BLOCK_SIZE_M, int THREADS_X>
 __global__ void moe_gemm_q4_kernel_rdna3(
     const T*, T*, const uint32_t*, const T*, const uint32_t*, const float*,
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
@@ -473,7 +479,7 @@ __global__ void moe_gemm_q4_kernel_rdna3(
 // Launcher
 // ---------------------------------------------------------------------------
 
-template <typename T, int BLOCK_SIZE_M>
+template <typename T, int BLOCK_SIZE_M, int THREADS_X>
 void launch_moe_gemm_q4(
     const T* a, T* c, const uint32_t* b_q_weight, const T* b_scales,
     const uint32_t* b_qzeros, const float* topk_weights,
@@ -484,14 +490,70 @@ void launch_moe_gemm_q4(
     int output_topk, cudaStream_t stream) {
   dim3 block(THREADS_X);
   dim3 grid(num_token_blocks,
-            (size_n + BLOCK_KN_SIZE * 4 - 1) / (BLOCK_KN_SIZE * 4),
+            (size_n + THREADS_X * 4 - 1) / (THREADS_X * 4),
             (size_k + BLOCK_KN_SIZE - 1) / BLOCK_KN_SIZE);
 
-  moe_gemm_q4_kernel_rdna3<T, BLOCK_SIZE_M><<<grid, block, 0, stream>>>(
-      a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
-      expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups, top_k,
-      expert_weight_stride, expert_scales_stride, expert_zeros_stride,
-      mul_topk_weight, output_topk);
+  moe_gemm_q4_kernel_rdna3<T, BLOCK_SIZE_M, THREADS_X>
+      <<<grid, block, 0, stream>>>(
+          a, c, b_q_weight, b_scales, b_qzeros, topk_weights,
+          sorted_token_ids, expert_ids, num_tokens_post_padded, size_m, size_n,
+          size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
+          expert_zeros_stride, mul_topk_weight, output_topk);
+}
+
+// Pick the smallest wave-multiple THREADS_X whose 4-column N tile covers
+// size_n, so small-N GEMMs (w1's 2*inter) don't idle most of the block. The
+// WMMA MoE kernel needs no such fix: its 64-column tile divides 384 exactly.
+inline int pick_threads_x(int size_n) {
+  if (size_n <= 384) return 96;   // N tile 384
+  if (size_n <= 768) return 192;  // N tile 768
+  return 256;                     // N tile 1024
+}
+
+template <typename T, int THREADS_X>
+void dispatch_block_size_m(
+    const T* a, T* c, const uint32_t* b_q_weight, const T* b_scales,
+    const uint32_t* b_qzeros, const float* topk_weights,
+    const int32_t* sorted_token_ids, const int32_t* expert_ids,
+    const int32_t* num_tokens_post_padded, int num_token_blocks, int size_m,
+    int size_n, int size_k, int groups, int top_k, int block_size_m,
+    int expert_weight_stride, int expert_scales_stride, int expert_zeros_stride,
+    bool mul_topk_weight, int output_topk, cudaStream_t stream) {
+  switch (block_size_m) {
+    case 1:
+      launch_moe_gemm_q4<T, 1, THREADS_X>(
+          a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
+          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
+          size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
+          expert_zeros_stride, mul_topk_weight, output_topk, stream);
+      break;
+    case 2:
+      launch_moe_gemm_q4<T, 2, THREADS_X>(
+          a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
+          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
+          size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
+          expert_zeros_stride, mul_topk_weight, output_topk, stream);
+      break;
+    case 4:
+      launch_moe_gemm_q4<T, 4, THREADS_X>(
+          a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
+          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
+          size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
+          expert_zeros_stride, mul_topk_weight, output_topk, stream);
+      break;
+    case 8:
+      launch_moe_gemm_q4<T, 8, THREADS_X>(
+          a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
+          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
+          size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
+          expert_zeros_stride, mul_topk_weight, output_topk, stream);
+      break;
+    default:
+      TORCH_CHECK(false,
+                  "moe_gptq_gemm_rdna3: block_size_m must be 1, 2, 4, or 8, "
+                  "got ",
+                  block_size_m);
+  }
 }
 
 template <typename T>
@@ -503,41 +565,31 @@ void dispatch_moe_gemm_q4(
     int size_n, int size_k, int groups, int top_k, int block_size_m,
     int expert_weight_stride, int expert_scales_stride, int expert_zeros_stride,
     bool mul_topk_weight, int output_topk, cudaStream_t stream) {
-  // Dispatch to template instantiation based on block_size_m
-  switch (block_size_m) {
-    case 1:
-      launch_moe_gemm_q4<T, 1>(
+  switch (pick_threads_x(size_n)) {
+    case 96:
+      dispatch_block_size_m<T, 96>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
-          size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, stream);
+          size_k, groups, top_k, block_size_m, expert_weight_stride,
+          expert_scales_stride, expert_zeros_stride, mul_topk_weight,
+          output_topk, stream);
       break;
-    case 2:
-      launch_moe_gemm_q4<T, 2>(
+    case 192:
+      dispatch_block_size_m<T, 192>(
           a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
           expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
-          size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, stream);
-      break;
-    case 4:
-      launch_moe_gemm_q4<T, 4>(
-          a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
-          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
-          size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, stream);
-      break;
-    case 8:
-      launch_moe_gemm_q4<T, 8>(
-          a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
-          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
-          size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
-          expert_zeros_stride, mul_topk_weight, output_topk, stream);
+          size_k, groups, top_k, block_size_m, expert_weight_stride,
+          expert_scales_stride, expert_zeros_stride, mul_topk_weight,
+          output_topk, stream);
       break;
     default:
-      TORCH_CHECK(false,
-                  "moe_gptq_gemm_rdna3: block_size_m must be 1, 2, 4, or 8, "
-                  "got ",
-                  block_size_m);
+      dispatch_block_size_m<T, 256>(
+          a, c, b_q_weight, b_scales, b_qzeros, topk_weights, sorted_token_ids,
+          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
+          size_k, groups, top_k, block_size_m, expert_weight_stride,
+          expert_scales_stride, expert_zeros_stride, mul_topk_weight,
+          output_topk, stream);
+      break;
   }
 }
 
