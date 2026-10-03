@@ -259,6 +259,20 @@ __global__ void moe_gemm_q4_kernel_rdna3(
     for (int j = 0; j < 4; ++j) block_c[m][j] = 0.0f;
   }
 
+  // bf16 M=1 reads A straight from global on every K step. The token index
+  // (a runtime-divisor integer division) and the row base pointer are
+  // invariant across K, so compute them once instead of per K step.
+  constexpr bool BF16_M1 = !std::is_same<T, half>::value && (BLOCK_SIZE_M == 1);
+  [[maybe_unused]] const T* m1_a_row = nullptr;
+  [[maybe_unused]] bool m1_valid = false;
+  if constexpr (BF16_M1) {
+    const int m1_token_row = sorted_token_ids[offset_m_base] / top_k;
+    m1_valid = (m1_token_row < size_m);
+    if (m1_valid) {
+      m1_a_row = a + (int64_t)m1_token_row * size_k + offset_k;
+    }
+  }
+
   // --- Main K-loop ---
   int k = offset_k;
   while (k < end_k) {
@@ -313,24 +327,21 @@ __global__ void moe_gemm_q4_kernel_rdna3(
         uint32_t w[4];
         __builtin_memcpy(w, &b_w[j], sizeof(int4));
 
-        // Load activations — read from global (no LDS for bf16 M=1)
+        // Load activations — read from global (no LDS for bf16 M=1).
+        // Token index and row base are loop-invariant; computed once above.
         pack4 a_pack;
-        {
-          int32_t token_id = sorted_token_ids[offset_m_base];
-          int token_row = token_id / top_k;
-          if (token_row < size_m) {
-            const uint32_t* a_words = reinterpret_cast<const uint32_t*>(
-                a + (int64_t)token_row * size_k + offset_k + a_off);
-            a_pack.u[0] = a_words[0];
-            a_pack.u[1] = a_words[1];
-            a_pack.u[2] = a_words[2];
-            a_pack.u[3] = a_words[3];
-          } else {
-            a_pack.u[0] = 0;
-            a_pack.u[1] = 0;
-            a_pack.u[2] = 0;
-            a_pack.u[3] = 0;
-          }
+        if (m1_valid) {
+          const uint32_t* a_words =
+              reinterpret_cast<const uint32_t*>(m1_a_row + a_off);
+          a_pack.u[0] = a_words[0];
+          a_pack.u[1] = a_words[1];
+          a_pack.u[2] = a_words[2];
+          a_pack.u[3] = a_words[3];
+        } else {
+          a_pack.u[0] = 0;
+          a_pack.u[1] = 0;
+          a_pack.u[2] = 0;
+          a_pack.u[3] = 0;
         }
 
         // sum_a for bias correction
