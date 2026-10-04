@@ -72,6 +72,10 @@ class SimpleCPUOffloadWorker:
         # Compute-done event recorded before each store; reused across steps
         # (get_finished runs once per step, copy queue is FIFO).
         self._store_compute_done: torch.Event | None = None
+        # Compute-done event recorded before each load: a reused destination
+        # block may still be written by an in-flight forward under async
+        # scheduling, and the H2D copy must not race that write.
+        self._load_compute_done: torch.Event | None = None
 
         # Pending event index sets, populated in bind_connector_metadata
         self._pending_load_event_indices: set[int] = set()
@@ -266,12 +270,20 @@ class SimpleCPUOffloadWorker:
         if metadata is not None and metadata.load_cpu_blocks:
             backend = self._backend
             assert backend is not None
+            # A load's destination block may have just been reused from a
+            # request whose forward is still executing on the compute stream
+            # (async scheduling runs the scheduler ahead of the GPU), so gate
+            # the H2D copy on a compute-done event or it can race that write.
+            if self._load_compute_done is None:
+                self._load_compute_done = torch.Event()
+            self._load_compute_done.record(torch.cuda.current_stream())
             backend.launch_copy(
                 metadata.load_cpu_blocks,
                 metadata.load_gpu_blocks,
                 is_store=False,
                 event_idx=metadata.load_event,
                 events_list=self._load_events,
+                wait_event=self._load_compute_done,
             )
 
     def wait_for_save(self) -> None:

@@ -265,8 +265,13 @@ class _RecordingBackend:
         self.calls.append({"is_store": is_store, "wait_event": wait_event})
 
 
-def test_transfer_hooks_pass_wait_event_for_store_only():
-    """wait_for_save gates stores on a compute-done event; start_load_kv does not."""
+def test_transfer_hooks_gate_on_compute_done():
+    """Both stores and loads gate on a compute-done event.
+
+    Stores read live KV the compute stream may still be writing; loads write
+    destination blocks a reused request's in-flight forward may still be
+    writing under async scheduling.
+    """
     worker = SimpleCPUOffloadWorker(
         vllm_config=None, kv_cache_config=None, cpu_capacity_bytes=0
     )
@@ -289,7 +294,7 @@ def test_transfer_hooks_pass_wait_event_for_store_only():
     assert len(store_calls) == 1
     assert len(load_calls) == 1
     assert isinstance(store_calls[0]["wait_event"], torch.Event)
-    assert load_calls[0]["wait_event"] is None
+    assert isinstance(load_calls[0]["wait_event"], torch.Event)
 
 
 def test_build_params_src_access_order():
