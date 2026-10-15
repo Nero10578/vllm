@@ -11,13 +11,17 @@ The dispatch table itself (radiance_kernels.py) is placed into site-packages sep
 Dockerfile COPYs it there). After this, routing changes are edits to radiance_kernels.py, no
 vLLM re-patch.
 """
+import os
 import sysconfig
 from pathlib import Path
 from _patchlib import apply
 
 SP = Path(sysconfig.get_paths()["purelib"])
 CFG = SP / "aiter/ops/triton/utils/gemm_config_utils.py"
-KERN = SP / "vllm/model_executor/kernels/linear/scaled_mm/triton.py"
+# The vllm hunk must target the live package: the source tree under an editable install,
+# site-packages under a wheel. Already present in the fork source, so this no-ops there.
+_VROOT = Path(os.environ.get("RADIANCE_VLLM_ROOT") or SP)
+KERN = _VROOT / "vllm/model_executor/kernels/linear/scaled_mm/triton.py"
 
 CFG_ANCHOR = (
     "    add_default_gemm_config_params(config)\n"

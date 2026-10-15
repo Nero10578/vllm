@@ -39,11 +39,11 @@ TORCH_VERSION="${RADIANCE_TORCH_VERSION:-2.13.0}"
 TORCHVISION_VERSION="${RADIANCE_TORCHVISION_VERSION:-0.28.0}"
 TORCHAUDIO_VERSION="${RADIANCE_TORCHAUDIO_VERSION:-2.11.0.2}"
 ROCM_WHEEL_INDEX="${RADIANCE_ROCM_WHEEL_INDEX:-https://stable.repo.amd.com/rocm/whl-next/}"
-# wheel (default, mirrors the image) installs a real site-packages/vllm so the config
-# copy and out-of-tree patches land in the actual package. editable is supported but
-# the setuptools editable finder does not get along with the config copy into
-# site-packages/vllm; use wheel unless you have a reason to edit the source live.
-INSTALL_MODE="${RADIANCE_INSTALL_MODE:-wheel}"   # wheel | editable
+# editable (default): edits under vllm/** take effect with no rebuild. The config copy
+# below is redirected to the live package (VLLM_PKG) so it never materializes a
+# site-packages/vllm that would shadow the editable package. Set
+# RADIANCE_INSTALL_MODE=wheel to instead build a real site-packages/vllm (image-style).
+INSTALL_MODE="${RADIANCE_INSTALL_MODE:-editable}"   # editable | wheel
 
 # ROCm 10 keeps the SDK under /opt/rocm/core-10.0; fall back to /opt/rocm.
 ROCM_ROOT="${RADIANCE_ROCM_ROOT:-}"
@@ -243,6 +243,9 @@ else
   # Remove any prior install (including a stale editable finder/.pth) before reinstalling.
   uv pip uninstall --python "$PY" vllm 2>/dev/null || true
   if [ "$INSTALL_MODE" = "editable" ]; then
+    # A leftover real site-packages/vllm (from a prior wheel install) shadows the
+    # editable package; drop it before reinstalling.
+    rm -rf "$SP/vllm"
     VLLM_TARGET_DEVICE=rocm uv pip install --python "$PY" --no-build-isolation -e "$ROOT"
   else
     VLLM_TARGET_DEVICE=rocm uv pip install --python "$PY" --no-build-isolation "$ROOT"
@@ -252,6 +255,15 @@ else
   uv pip uninstall --python "$PY" amd-quark 2>/dev/null || true
 fi
 SP="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+
+# Where the *live* vllm package lives: the source tree for an editable install, the
+# site-packages copy for a wheel. The config copy targets this so an editable install
+# is never shadowed by a real site-packages/vllm.
+if [ "$INSTALL_MODE" = "editable" ]; then
+  VLLM_PKG="$ROOT"
+else
+  VLLM_PKG="$SP"
+fi
 
 # -----------------------------------------------------------------------------
 if [ "$SKIP_R4D" != "1" ]; then
@@ -301,11 +313,11 @@ fi
 # -----------------------------------------------------------------------------
 if [ "$SKIP_CONFIGS" != "1" ]; then
   log "tuned configs + amdsmi startup hook"
-  install -d "$SP/vllm/model_executor/layers/quantization/utils/configs"
-  install -d "$SP/vllm/model_executor/layers/fused_moe/configs"
+  install -d "$VLLM_PKG/vllm/model_executor/layers/quantization/utils/configs"
+  install -d "$VLLM_PKG/vllm/model_executor/layers/fused_moe/configs"
   install -d "$SP/aiter/ops/triton/configs/gemm" 2>/dev/null || true
-  cp -f "$CONFIGS"/fp8/*.json  "$SP/vllm/model_executor/layers/quantization/utils/configs/"
-  cp -f "$CONFIGS"/moe/*.json  "$SP/vllm/model_executor/layers/fused_moe/configs/"
+  cp -f "$CONFIGS"/fp8/*.json  "$VLLM_PKG/vllm/model_executor/layers/quantization/utils/configs/"
+  cp -f "$CONFIGS"/moe/*.json  "$VLLM_PKG/vllm/model_executor/layers/fused_moe/configs/"
   cp -f "$CONFIGS"/mxfp4/*.json "$SP/aiter/ops/triton/configs/gemm/" 2>/dev/null \
     || warn "aiter config dir absent; MXFP4 tiles not installed (aiter not in this env?)"
   cp -f "$ROOT/radiance_amdsmi.pth" "$SP/radiance_amdsmi.pth"
@@ -317,6 +329,8 @@ fi
 # -----------------------------------------------------------------------------
 if [ "$SKIP_PATCHES" != "1" ]; then
   log "out-of-tree patches (torch / transformers / aiter)"
+  # Let vllm-targeting patches resolve the live package (source tree when editable).
+  export RADIANCE_VLLM_ROOT="$VLLM_PKG"
   cd "$PATCHES"
   # Each script reports drift instead of corrupting a file; a reported failure
   # simply means that optimization is off for the installed package version.
