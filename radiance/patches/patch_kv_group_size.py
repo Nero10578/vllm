@@ -59,7 +59,8 @@ from pathlib import Path
 from _patchlib import apply
 
 SP = Path(sysconfig.get_paths()["purelib"])
-KV = SP / "vllm/v1/core/kv_cache_utils.py"
+# Upstream #61183 moved _get_kv_cache_groups_uniform_page_size to kv_cache_planning.py.
+KV = SP / "vllm/v1/core/kv_cache_planning.py"
 
 # --- 1. thread vllm_config in so we can ask each spec what a request costs -------------------
 SIG_ANCHOR = (
