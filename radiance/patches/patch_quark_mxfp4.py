@@ -92,12 +92,20 @@ REGISTER_NEW = (
     "    # force the engine core to spawn instead of fork. It declines via is_supported() unless\n"
     "    # RADIANCE_MXFP4_W4A8=1 on gfx12x, so the list is unchanged everywhere else.\n"
     "    try:\n"
+    "        import os as _radiance_os\n"
     "        import radiance_mxfp4 as _radiance_mxfp4\n"
     "\n"
     "        _radiance_cls = _radiance_mxfp4.kernel_class()\n"
     "        if _radiance_cls is not None:\n"
-    "            possible.insert(0, _radiance_cls)\n"
-    "    except Exception as _radiance_exc:  # never block model load on our own kernel\n"
+    "            if _radiance_os.environ.get('RADIANCE_MXFP4_W4A8') == '1':\n"
+    "                possible = [_radiance_cls]  # explicitly required, never emulation\n"
+    "            else:\n"
+    "                possible.insert(0, _radiance_cls)\n"
+    "        elif _radiance_os.environ.get('RADIANCE_MXFP4_W4A8') == '1':\n"
+    "            raise RuntimeError('Required Radiance W4A8 extension is unavailable')\n"
+    "    except Exception as _radiance_exc:\n"
+    "        if _radiance_os.environ.get('RADIANCE_MXFP4_W4A8') == '1':\n"
+    "            raise\n"
     '        logger.warning_once("[radiance] MXFP4 W4A8 kernel unavailable: %r", _radiance_exc)\n'
 )
 
@@ -132,7 +140,7 @@ SUPPORTS_NEW = (
 )
 
 
-# --- 3. aiter moved the fp4 GEMM module, and gates fp4 on its own arch allowlist -----
+# --- 3. aiter 0.1.17 moved the fp4 GEMM module, and gates fp4 on its own arch allowlist -----
 # Re-anchored for the newer base, which imports gemm_afp4wfp4_preshuffle rather than
 # gemm_afp4wfp4_preshuffled_weight_scales. Keep the caller's symbol names.
 IMPORT_ANCHOR = (
@@ -175,7 +183,7 @@ def main():
           "[radiance] native MXFP4 enabled on gfx12x",
           "mxfp4: relax aiter's CDNA4 gate")
     apply(KA, IMPORT_ANCHOR, IMPORT_NEW,
-          "aiter moved this module",
+          "aiter 0.1.17 moved this module",
           "mxfp4: aiter moved-module + fp4 arch allowlist")
 
 

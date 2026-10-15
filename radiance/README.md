@@ -84,6 +84,18 @@ The radiance overlays were authored as exact-string patches against **vLLM v0.28
 (`2cf0a691`). This fork tracks a **newer upstream base** (~1,750 commits later), so each overlay was
 classified rather than blindly applied:
 
+> **Re-sync (radiance `main` @ `d5c07c5`).** The vendored overlays and runtime modules were brought
+> forward from the standalone vllm-radiance distribution (the 54-commit maintenance/qualification
+> series after `285ac78`). Runtime modules: `radiance_mxfp4.py` (TP1 gate/up `N=34816` decode-scratch
+> sizing + `input_quant_key` returning `None` for compressed-tensors), `radiance_mxfp4_fp8.hip`
+> (`DEC_MAX_N` 32768→36864), `radiance_verifyhead.py` (global-top-k selection via
+> `RADIANCE_VERIFY_HEAD_GLOBAL_TOPK`), and the new `radiance_nvfp4.py` (bounded NVFP4→MXFP4 load
+> conversion, opt-in) and `radiance_platform_probe.py`. Patch archives updated: `patch_dynwidth`,
+> `patch_gdn_merge_inproj`, `patch_gdn_metadata`, `patch_quark_mxfp4`, `patch_r4d`,
+> `patch_verify_head`, the four `patch_kv_offload_*` overlays and `r4d_radiance_extras.patch`;
+> `patch_nvfp4_mxfp4.py` added. The nine upstream-owned overlays listed as retired below were
+> removed from `radiance/patches/` to match radiance.
+
 ### Applied in-tree (the fork *is* the patched source)
 
 `patch_gfx1201`, `patch_radiance_dispatch` (vLLM hunk), `patch_skinny_gemm`, `patch_gdn_wmma`,
