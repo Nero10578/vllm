@@ -777,14 +777,22 @@ def get_compressed_tensors_block_structure(config, default_value=None):
 
 
 def get_weight_block_size_safety(config, default_value=None):
-    quantization_config = getattr(config, "quantization_config", {})
-    if isinstance(quantization_config, dict):
-        if "weight_block_size" in quantization_config:
-            return quantization_config["weight_block_size"]
-        return get_compressed_tensors_block_structure(
-            quantization_config, default_value
-        )
-    return default_value
+    def _extract(cfg):
+        quantization_config = getattr(cfg, "quantization_config", None)
+        if isinstance(quantization_config, dict):
+            if "weight_block_size" in quantization_config:
+                return quantization_config["weight_block_size"]
+            return get_compressed_tensors_block_structure(
+                quantization_config, default_value
+            )
+        return None
+
+    block_size = _extract(config)
+    if block_size is None and hasattr(config, "get_text_config"):
+        text_config = config.get_text_config()
+        if text_config is not config:
+            block_size = _extract(text_config)
+    return block_size if block_size is not None else default_value
 
 
 def get_model_params(config):
@@ -830,6 +838,10 @@ def get_model_params(config):
         "Qwen3VLMoeForConditionalGeneration",
         "Qwen3_5MoeForConditionalGeneration",
         "Qwen3_5MoeTextConfig",
+        "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
+        "Qwen4ExpTextConfig",
+        "Qwen4ExpConfig",
     ):
         text_config = config.get_text_config()
         E = text_config.num_experts
