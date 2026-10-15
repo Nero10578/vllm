@@ -127,6 +127,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_ENABLE_PCIE_ALLREDUCE: bool = False
     VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE: int = 0
+    VLLM_CUSTOM_ALLREDUCE_ALGO: str = "auto"
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
@@ -1207,6 +1208,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the custom path instead of falling back to NCCL. 0 keeps the default.
     "VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE": lambda: int(
         os.getenv("VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE", "0")
+    ),
+    # Force the custom allreduce kernel variant: "1stage"/"oneshot",
+    # "2stage"/"twoshot", or "auto". Consumed by the C++ kernel (see
+    # csrc/custom_all_reduce.cuh); declared here so env validation passes.
+    "VLLM_CUSTOM_ALLREDUCE_ALGO": lambda: os.getenv(
+        "VLLM_CUSTOM_ALLREDUCE_ALGO", "auto"
     ),
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
