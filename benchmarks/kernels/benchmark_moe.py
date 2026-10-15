@@ -9,6 +9,7 @@ import time
 from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
+from types import SimpleNamespace
 from typing import Any, TypedDict
 
 import ray
@@ -31,6 +32,9 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    refine_fp8_moe_block_shape,
+)
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -973,6 +977,20 @@ def main(args: argparse.Namespace):
         # For int4_w4a16, block_shape = [0, group_size]
         # block_shape[0]=0 means no block quantization on N dimension
         block_quant_shape = [0, group_size]
+
+    if use_fp8_w8a8 and block_quant_shape is not None:
+        # Mirror the runtime TP-sharding refinement (fp8.py) so the tuned tile
+        # grid and filename match the block shape the model actually runs with.
+        refined_block_shape = refine_fp8_moe_block_shape(
+            SimpleNamespace(
+                intermediate_size_per_partition=shard_intermediate_size // 2,
+                tp_size=args.tp_size,
+                hidden_dim=hidden_size,
+            ),
+            block_quant_shape,
+        )
+        if refined_block_shape is not None:
+            block_quant_shape = refined_block_shape
 
     if args.batch_size is None:
         batch_sizes = [
