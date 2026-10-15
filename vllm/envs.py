@@ -126,6 +126,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_ENABLE_PCIE_ALLREDUCE: bool = False
+    VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE: int = 0
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
@@ -1200,6 +1201,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Requires P2P-capable driver. See PR #39040 for details.
     "VLLM_ENABLE_PCIE_ALLREDUCE": lambda: (
         os.getenv("VLLM_ENABLE_PCIE_ALLREDUCE", "0") in ("1", "true", "True")
+    ),
+    # Custom allreduce buffer size in bytes for PCIe-only topologies. Larger
+    # values keep bigger allreduce payloads (e.g. chunked-prefill batches) on
+    # the custom path instead of falling back to NCCL. 0 keeps the default.
+    "VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE": lambda: int(
+        os.getenv("VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE", "0")
     ),
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel

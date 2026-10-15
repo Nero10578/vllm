@@ -284,6 +284,17 @@ class CustomAllreduce:
             # topology, treat it as eligible for the same small-tensor custom
             # allreduce path as a fully connected topology.
             fully_connected = True
+            # PCIe allreduce buffer size is a pure throughput/latency tradeoff
+            # against NCCL, so allow the operator to raise it past the 8 MiB
+            # default (e.g. to keep chunked-prefill batches on the custom path).
+            pcie_max_size = envs.VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE
+            if pcie_max_size > 0:
+                max_size = pcie_max_size
+                logger.info(
+                    "PCIe custom allreduce max size set to %d bytes via "
+                    "VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE",
+                    max_size,
+                )
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
