@@ -125,6 +125,9 @@ if TYPE_CHECKING:
     VLLM_TRITON_JIT_WARMUP_NUM_THREADS: int = 4
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
+    VLLM_ENABLE_PCIE_ALLREDUCE: bool = False
+    VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE: int = 0
+    VLLM_CUSTOM_ALLREDUCE_ALGO: str = "auto"
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
@@ -1196,6 +1199,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # so that vLLM can verify if p2p is actually working.
     # See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
+    # Allow custom allreduce on topologies with more than two PCIe-only GPUs.
+    # Requires P2P-capable driver. See PR #39040 for details.
+    "VLLM_ENABLE_PCIE_ALLREDUCE": lambda: (
+        os.getenv("VLLM_ENABLE_PCIE_ALLREDUCE", "0") in ("1", "true", "True")
+    ),
+    # Custom allreduce buffer size in bytes for PCIe-only topologies. Larger
+    # values keep bigger allreduce payloads (e.g. chunked-prefill batches) on
+    # the custom path instead of falling back to NCCL. 0 keeps the default.
+    "VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE": lambda: int(
+        os.getenv("VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE", "0")
+    ),
+    # Force the custom allreduce kernel variant: "1stage"/"oneshot",
+    # "2stage"/"twoshot", or "auto". Consumed by the C++ kernel (see
+    # csrc/custom_all_reduce.cuh); declared here so env validation passes.
+    "VLLM_CUSTOM_ALLREDUCE_ALGO": lambda: os.getenv(
+        "VLLM_CUSTOM_ALLREDUCE_ALGO", "auto"
+    ),
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel
     # selection

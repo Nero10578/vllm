@@ -1211,8 +1211,12 @@ class RocmPlatform(Platform):
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        # We only enable custom allreduce for MI300 series
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95"])
+        # Upstream restricts this to the MI300 series (gfx94/gfx95). RDNA4
+        # (gfx1200/gfx1201) is allowed here too so the portable IPC
+        # peer-buffer allreduce can run on Radeon parts. Correctness on a
+        # PCIe-only group still depends on P2P being available on every rank,
+        # which vLLM does not verify on ROCm.
+        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95"]) or on_rdna4()
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

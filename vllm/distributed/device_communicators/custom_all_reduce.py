@@ -268,12 +268,32 @@ class CustomAllreduce:
             assert current_platform.is_cuda_alike()
             fully_connected = current_platform.is_fully_connected(physical_device_ids)
         if same_node and world_size > 2 and not fully_connected:
-            logger.warning(
-                "Custom allreduce is disabled because it's not supported on"
-                " more than two PCIe-only GPUs. To silence this warning, "
-                "specify disable_custom_all_reduce=True explicitly."
+            if not envs.VLLM_ENABLE_PCIE_ALLREDUCE:
+                logger.warning(
+                    "Custom allreduce is disabled because it's not supported on"
+                    " more than two PCIe-only GPUs. To silence this warning, "
+                    "specify disable_custom_all_reduce=True explicitly, or set"
+                    " VLLM_ENABLE_PCIE_ALLREDUCE=1 to enable it on a"
+                    " P2P-capable PCIe-only topology."
+                )
+                return
+            logger.info(
+                "PCIe custom allreduce enabled via VLLM_ENABLE_PCIE_ALLREDUCE=1"
             )
-            return
+            # Treat the opted-in PCIe topology as fully connected so the kernel
+            # takes the same path as an NVLink/XGMI fully connected topology.
+            fully_connected = True
+            # The allreduce buffer size is a pure throughput/latency tradeoff
+            # against NCCL, so allow the operator to raise it past the 8 MiB
+            # default (e.g. to keep chunked-prefill batches on the custom path).
+            pcie_max_size = envs.VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE
+            if pcie_max_size > 0:
+                max_size = pcie_max_size
+                logger.info(
+                    "PCIe custom allreduce max size set to %d bytes via "
+                    "VLLM_PCIE_CUSTOM_ALLREDUCE_MAX_SIZE",
+                    max_size,
+                )
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
