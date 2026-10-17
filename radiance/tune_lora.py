@@ -67,10 +67,12 @@ def _is_oom(exc: BaseException) -> bool:
 
 
 def shrink_space(quick: bool):
+    # split_k matters with m: vLLM's default uses split_k=64 for small batches
+    # and 8 for m>=128, so both must be in the grid for prefill-sized m.
     if quick:
-        blocks_m, blocks_n, split_ks = (32, 64, 128), (16, 32), (64,)
+        blocks_m, blocks_n, split_ks = (32, 64, 128), (16, 32), (8, 64)
     else:
-        blocks_m, blocks_n, split_ks = (16, 32, 64, 128), (16, 32, 64), (1, 64)
+        blocks_m, blocks_n, split_ks = (16, 32, 64, 128), (16, 32, 64), (1, 8, 64)
     for block_m in blocks_m:
         for block_n in blocks_n:
             for block_k in (128, 256):
@@ -289,6 +291,20 @@ def main() -> None:
     parser.add_argument(
         "--batch-sizes", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32]
     )
+    parser.add_argument(
+        "--prefill",
+        action="store_true",
+        help="Also tune prefill token counts: extends --batch-sizes with a "
+        "spread up to --prefill-max (chunked-prefill m can reach "
+        "max_num_batched_tokens).",
+    )
+    parser.add_argument(
+        "--prefill-max",
+        type=int,
+        default=2496,
+        help="Upper prefill token count to tune (default: the server's "
+        "max_num_batched_tokens).",
+    )
     parser.add_argument("--dtype", choices=list(DTYPE_MAP), default="bfloat16")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
@@ -320,6 +336,11 @@ def main() -> None:
         found = ranks_from_dir(args.lora_dir)
         if found:
             args.lora_ranks = found
+    if args.prefill:
+        spread = [m for m in (64, 128, 256, 512, 1024, 1536, 2048)
+                  if m < args.prefill_max]
+        spread.append(args.prefill_max)
+        args.batch_sizes = sorted(set(args.batch_sizes) | set(spread))
 
     torch.cuda.init()
     torch.accelerator.set_device_index(0)
