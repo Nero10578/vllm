@@ -273,14 +273,20 @@ def _apply_attn_tune_new(op, params, c, logged):
         return c
 
     if op == "attn_2d":  # prefill / MTP decode-via-2D
+        # The per-head-size table is a property of the head width alone (the head-512 entry is an
+        # occupancy fix -- 8 query rows per warp -- not a matmul-shape one), so it is a function of
+        # head_size and max_seqlen_q, never of the cache dtype. Applying it only on the fp8 path
+        # left the Gemma4 global layers on AITER's default BLOCK_M at bf16 KV.
+        large_prefill = int(getattr(params, "max_seqlen_q", 0) or 0) >= 256
         if two_byte:
             c["TILE_SIZE"] = 16
             c["num_warps"] = 4
             c["num_stages"] = 1
             c["waves_per_eu"] = 1
-        elif int(getattr(params, "max_seqlen_q", 0) or 0) >= 256:
+        elif large_prefill:
             c["TILE_SIZE"] = 16
             c["waves_per_eu"] = 1
+        if large_prefill:
             tuned = _PREFILL_2D_BY_HEAD.get(head_size)
             if tuned is not None:
                 c.update(tuned)
