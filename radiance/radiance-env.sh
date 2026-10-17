@@ -89,12 +89,6 @@ export RADIANCE_AR_QNB="${RADIANCE_AR_QNB:-96}"
 export RADIANCE_PRESHUFFLE="${RADIANCE_PRESHUFFLE:-1}"
 export RADIANCE_ATTN_TUNE="${RADIANCE_ATTN_TUNE:-1}"
 export RADIANCE_FUSE_RMS_QUANT="${RADIANCE_FUSE_RMS_QUANT:-1}"
-# Dense block-FP8 (W8A8, 128x128) on the gfx1201 fp8 matrix instruction. Off by default: it is a
-# new kernel and must pass radiance/gate_fp8_block.py first. Needs the weight in [N,K] form, so it
-# applies to compressed-tensors checkpoints (the preshuffle hook only wraps the native fp8 method);
-# when a weight is preshuffled the dispatcher declines and the aiter preshuffle route stays.
-export RADIANCE_FP8_WMMA="${RADIANCE_FP8_WMMA:-0}"
-export RADIANCE_FP8_WMMA_MIN_M="${RADIANCE_FP8_WMMA_MIN_M:-128}"
 
 export RADIANCE_DYNAMIC_DRAFT="${RADIANCE_DYNAMIC_DRAFT:-1}"
 export RADIANCE_DRAFT_SCHEDULE="${RADIANCE_DRAFT_SCHEDULE:-1:8,2:7,4:6,8:5,16:4}"

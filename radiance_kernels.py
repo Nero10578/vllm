@@ -18,9 +18,6 @@ try:
 except Exception:
     GFX12 = False
 
-# One-shot guard for the fp8-WMMA dispatch notice: the dispatcher runs per linear per step.
-_WMMA_WARNED = [False]
-
 
 # ---- preshuffle GEMM ----
 # Shuffle each block-fp8 weight once at load (shuffle_weight + reshape to [N//16, K*16]), transpose the
@@ -624,7 +621,6 @@ def install_all():
 
 def block_scaled_mm(kernel, A, B, As, Bs):
     """W8A8 block-FP8 GEMM (per-128-block scales) on gfx1201:
-      M>=MIN_M  hand-written fp8-WMMA kernel (RADIANCE_FP8_WMMA=1), when it can serve the shape
       M<=8   AITER split-K Triton GEMM (1.5-1.9x vs generic at small M)
       M>=16  vLLM generic kernel (AITER split-K regresses there)
     Preshuffled weights ([N//16, K*16], shape-detected) take the AITER preshuffle route."""
@@ -632,20 +628,6 @@ def block_scaled_mm(kernel, A, B, As, Bs):
     if GFX12 and _PS is not None and B.shape[1] == A.shape[1] * 16:   # preshuffled weight
         N = B.shape[0] * 16
         return torch.ops.radiance.preshuffle_gemm(A, B, As, Bs, N, A.shape[1])
-    if GFX12:
-        # Triton's fp8 tl.dot upconverts on gfx1201 and runs the 16-bit WMMA; the hand-written
-        # kernel uses v_wmma_f32_16x16x16_fp8_fp8 (325 vs 43 TFLOP/s). Returns None when the shape
-        # or the env gate rules it out, in which case the tuned Triton routes below stay.
-        try:
-            import radiance_fp8_block
-            y = radiance_fp8_block.block_scaled_mm(A, B, As, Bs, kernel.config.out_dtype)
-            if y is not None:
-                return y
-        except Exception as e:      # noqa: BLE001
-            if not _WMMA_WARNED[0]:
-                _WMMA_WARNED[0] = True
-                sys.stderr.write(f"[radiance] fp8-WMMA dispatch unavailable: {e!r}\n")
-                sys.stderr.flush()
     if GFX12 and M <= 8:
         return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(
             A, B, As, Bs, kernel.config.out_dtype)

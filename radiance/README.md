@@ -17,7 +17,6 @@ time:
 | Tuned FP8 / MoE / MXFP4 configs | `radiance/configs/` | `bootstrap.sh` |
 | `libr4d` gfx1201 kernel library (`r4d.so`) | pinned source + `patches/r4d_radiance_extras.patch` | `bootstrap.sh` |
 | MXFP4/W4A8 HIP extension (`radiance_mxfp4_fp8.so`) | `radiance_mxfp4_fp8.hip` | `bootstrap.sh` |
-| Block-FP8 fp8-WMMA extension (`radiance_fp8_block_wmma.so`) | `radiance_fp8_block_wmma.hip` | `bootstrap.sh` |
 | Out-of-tree patches (torch / transformers / aiter) | `radiance/patches/` | `bootstrap.sh` |
 | Qualified runtime env defaults | `radiance/radiance-env.sh` | sourced by the operator |
 
