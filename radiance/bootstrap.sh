@@ -298,13 +298,18 @@ if [ "$SKIP_HIPEXT" != "1" ]; then
   INC="$("$PY" -m pybind11 --includes)"
   hipcc -O3 -std=c++17 -fPIC -shared --offload-arch="$GFX_ARCH" -Wno-unused-result \
       $INC "$ROOT/radiance_mxfp4_fp8.hip" -o "$SP/radiance_mxfp4_fp8.so"
+  # Dense block-FP8 (W8A8, 128x128) on the fp8 matrix instruction. Same toolchain, same include set.
+  hipcc -O3 -std=c++17 -fPIC -shared --offload-arch="$GFX_ARCH" -Wno-unused-result \
+      $INC "$ROOT/radiance_fp8_block_wmma.hip" -o "$SP/radiance_fp8_block_wmma.so"
   "$PY" - <<PY || warn "radiance_mxfp4_fp8 import check failed (see error above); continuing"
 import radiance_mxfp4_fp8 as m
 assert all(hasattr(m, n) for n in (
     "launch", "launch_at", "set_decode_scratch",
     "launch_add_rms_quant", "launch_silu_mul_quant", "launch_gdn_norm_quant",
 ))
-print("radiance_mxfp4_fp8 OK")
+import radiance_fp8_block_wmma as b
+assert hasattr(b, "launch")
+print("radiance_mxfp4_fp8 + radiance_fp8_block_wmma OK")
 PY
 else
   log "HIP extension skipped"
@@ -359,6 +364,7 @@ except Exception as e:
     print("r4d not loaded:", e)
 try:
     import radiance_mxfp4_fp8  # noqa: F401
+    import radiance_fp8_block_wmma  # noqa: F401
     import radiance_kernels  # noqa: F401
     print("radiance runtime modules OK")
 except Exception as e:
