@@ -66,13 +66,13 @@ __global__ __launch_bounds__((BMF / 32) * 2 * 32) void radiance_fp8_block_wmma_g
   const int kgrp = K / WG_K;          // K/128 scale groups
   const int nb = n0 / WG_N;           // this CTA's weight n-block (BN=64 < WG_N=128, so it is unique)
 
-  floatx8 acc[2][2];
+  floatx8 acc[2][2], tmp[2][2];
 #pragma unroll
   for (int i = 0; i < 2; ++i)
 #pragma unroll
     for (int j = 0; j < 2; ++j)
 #pragma unroll
-      for (int e = 0; e < 8; ++e) acc[i][j][e] = 0.f;
+      for (int e = 0; e < 8; ++e) { acc[i][j][e] = 0.f; tmp[i][j][e] = 0.f; }
 
   for (int k0 = 0; k0 < K; k0 += BK) {
     {   // A tile: BMF*BK bytes, 32 B per thread. Clamp, never predicate -- a predicated staging
@@ -107,13 +107,6 @@ __global__ __launch_bounds__((BMF / 32) * 2 * 32) void radiance_fp8_block_wmma_g
 
 #pragma unroll
     for (int step = 0; step < BK / 16; ++step) {
-      floatx8 tmp[2][2];
-#pragma unroll
-      for (int i = 0; i < 2; ++i)
-#pragma unroll
-        for (int j = 0; j < 2; ++j)
-#pragma unroll
-          for (int e = 0; e < 8; ++e) tmp[i][j][e] = 0.f;
       const int kk = step * 16 + kb8;
       int2_t af[2], wf[2];
 #pragma unroll
@@ -134,16 +127,22 @@ __global__ __launch_bounds__((BMF / 32) * 2 * 32) void radiance_fp8_block_wmma_g
 #pragma unroll
         for (int j = 0; j < 2; ++j)
           tmp[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(af[i], wf[j], tmp[i][j]);
-      // Apply this 128-K block's scales to the block's partial product, then accumulate. Doing it
-      // here (rather than to the running accumulator) is what makes splitting the 128-K group into
-      // two BK=64 slabs exact: (p0 + p1)*s == p0*s + p1*s.
+    }
+    // The block scale is constant over the whole WG_K=128 group, which spans TWO BK=64 slabs. So
+    // accumulate both slabs into tmp and fold them into acc once, on the group's second slab:
+    // (p0 + p1) * s == p0*s + p1*s. Doing this per 16-wide step (the first version) cost an 8x
+    // rescale + LDS read per WMMA and made the kernel epilogue-bound -- measured 0.55-0.82x of
+    // Triton at every large-M shape even though the matrix math was correct.
+    if ((k0 % WG_K) == BK) {
 #pragma unroll
       for (int i = 0; i < 2; ++i)
 #pragma unroll
         for (int j = 0; j < 2; ++j)
 #pragma unroll
-          for (int e = 0; e < 8; ++e)
+          for (int e = 0; e < 8; ++e) {
             acc[i][j][e] += tmp[i][j][e] * sAs[wm * 32 + i * 16 + kb8 + e] * bsc;
+            tmp[i][j][e] = 0.f;
+          }
     }
     __syncthreads();
   }

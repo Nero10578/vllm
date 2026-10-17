@@ -12,7 +12,13 @@ shapes. Nothing here needs a loaded model: the data is synthetic block-FP8.
 Exit status is non-zero if any shape fails the tolerance, so it can gate a serve script.
 """
 import argparse
+import os
 import sys
+
+# The radiance runtime modules live at the repo root. Running a script inside radiance/ puts THIS
+# directory (not the root) at sys.path[0], so insert the root explicitly; otherwise the same
+# `import radiance_fp8_block` that works under the server fails here.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 
