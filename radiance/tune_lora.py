@@ -170,7 +170,7 @@ def tune_shrink(
         if us < best_us:
             best_us, best = us, config
     lora_shrink_op.get_lora_op_configs = _ORIG_SHRINK_CFG
-    return best, ok, failed, first_err
+    return best, best_us, ok, failed, first_err
 
 
 def tune_expand(
@@ -203,7 +203,7 @@ def tune_expand(
         if us < best_us:
             best_us, best = us, config
     lora_expand_op.get_lora_op_configs = _ORIG_EXPAND_CFG
-    return best, ok, failed, first_err
+    return best, best_us, ok, failed, first_err
 
 
 def nested(data: dict, path: list) -> dict:
@@ -242,29 +242,33 @@ def run_jobs(gpu_id: int, jobs: list, params: dict):
     shrink_data: dict = {}
     expand_data = {True: {}, False: {}}
     stats = {
-        "shrink": {"ok": 0, "failed": 0, "err": None},
-        "expand": {"ok": 0, "failed": 0, "err": None},
+        "shrink": {"ok": 0, "failed": 0, "err": None, "us": []},
+        "expand": {"ok": 0, "failed": 0, "err": None, "us": []},
     }
 
     for kind, hidden, rank, num_slices, m, add_inputs in tqdm(
         jobs, desc=f"GPU {gpu_id}", leave=False
     ):
         if kind == "shrink":
-            cfg, ok, failed, err = tune_shrink(
+            cfg, us, ok, failed, err = tune_shrink(
                 hidden, rank, num_slices, m, params["max_loras"], dtype, "cuda",
                 shrink_space_list, params["warmup"], params["iters"])
             stats["shrink"]["ok"] += ok
             stats["shrink"]["failed"] += failed
             stats["shrink"]["err"] = stats["shrink"]["err"] or err
             if cfg is not None:
+                stats["shrink"]["us"].append(us)
+            if cfg is not None:
                 nested(shrink_data, [params["max_loras"], num_slices, m, hidden, rank]).update(cfg)
         else:
-            cfg, ok, failed, err = tune_expand(
+            cfg, us, ok, failed, err = tune_expand(
                 hidden, rank, num_slices, m, params["max_loras"], add_inputs, dtype,
                 "cuda", expand_space_list, params["warmup"], params["iters"])
             stats["expand"]["ok"] += ok
             stats["expand"]["failed"] += failed
             stats["expand"]["err"] = stats["expand"]["err"] or err
+            if cfg is not None:
+                stats["expand"]["us"].append(us)
             if cfg is not None:
                 nested(expand_data[add_inputs], [params["max_loras"], num_slices, m, rank, hidden]).update(cfg)
 
@@ -334,14 +338,14 @@ def main() -> None:
     if args.smoke:
         h, r = args.hidden_sizes[0], args.lora_ranks[0]
         print("[smoke] running one shrink + one expand config on GPU 0...")
-        cfg, ok, failed, err = tune_shrink(
+        cfg, us, ok, failed, err = tune_shrink(
             h, r, 1, 1, args.max_loras, DTYPE_MAP[args.dtype], "cuda",
             list(shrink_space(True))[:1], 1, 1)
-        print(f"[smoke] shrink ok={ok} failed={failed} -> {cfg} {err or ''}")
-        cfg, ok, failed, err = tune_expand(
+        print(f"[smoke] shrink ok={ok} failed={failed} best={us:.1f}us -> {cfg} {err or ''}")
+        cfg, us, ok, failed, err = tune_expand(
             h, r, 1, 1, args.max_loras, True, DTYPE_MAP[args.dtype], "cuda",
             list(expand_space(True))[:1], 1, 1)
-        print(f"[smoke] expand ok={ok} failed={failed} -> {cfg} {err or ''}")
+        print(f"[smoke] expand ok={ok} failed={failed} best={us:.1f}us -> {cfg} {err or ''}")
         return
 
     jobs = []
@@ -372,8 +376,8 @@ def main() -> None:
     shrink_data: dict = {}
     expand_true: dict = {}
     expand_false: dict = {}
-    total = {"shrink": {"ok": 0, "failed": 0, "err": None},
-             "expand": {"ok": 0, "failed": 0, "err": None}}
+    total = {"shrink": {"ok": 0, "failed": 0, "err": None, "us": []},
+             "expand": {"ok": 0, "failed": 0, "err": None, "us": []}}
 
     if num_gpus == 1:
         results = [run_jobs(0, shards[0], params)]
@@ -392,10 +396,15 @@ def main() -> None:
             total[tag]["ok"] += st["ok"]
             total[tag]["failed"] += st["failed"]
             total[tag]["err"] = total[tag]["err"] or st["err"]
+            total[tag]["us"].extend(st["us"])
 
     for tag, st in total.items():
-        print(f"[tune_lora] {tag}: {st['ok']} configs tested OK, {st['failed']} "
-              f"skipped (OOM/compile)")
+        us = sorted(st["us"])
+        med = us[len(us) // 2] if us else 0.0
+        lo = us[0] if us else 0.0
+        print(f"[tune_lora] {tag}: {st['ok']} evals OK, {st['failed']} skipped "
+              f"(OOM/compile); best {lo:.1f}us, median {med:.1f}us over "
+              f"{len(us)} jobs")
         if st["ok"] == 0:
             print(f"[tune_lora] WARNING no {tag} config compiled successfully"
                   f"{'; first error: ' + st['err'] if st['err'] else ''}")
