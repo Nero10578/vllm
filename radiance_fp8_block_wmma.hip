@@ -7,12 +7,12 @@
 //   C   [M,N]        bf16
 //
 // Why this exists: vLLM's ROCm block-FP8 route is the Triton kernel
-// (_w8a8_triton_block_scaled_mm, `accumulator += tl.dot(a, b) * a_s * b_s`). On gfx1201 Triton
-// lowers `tl.dot` of e4m3 operands by upconverting them and running the 16-bit WMMA. Measured on
-// this card, register-resident: fp8 WMMA 325.2 TFLOP/s vs f16 160.2 (2.03x), while Triton's fp8
-// tl.dot manages only 43.3 -- it will not emit `v_wmma_f32_16x16x16_fp8_fp8`. So the whole block-FP8
-// GEMM runs on half-rate matrix cores at best, and on the conversion path at worst. This kernel is
-// the same math on the fp8 matrix instruction.
+// (_w8a8_triton_block_scaled_mm, `accumulator += tl.dot(a, b) * a_s * b_s`). On gfx1201 Triton will
+// not emit `v_wmma_f32_16x16x16_fp8_fp8`; it upconverts and runs the 16-bit WMMA. The tuned Triton
+// config is excellent at that -- measured here (radiance/gate_fp8_block.py) at 139-159 TFLOP/s,
+// i.e. ~87-99% of the 160.2 bf16 WMMA ceiling, so it has no headroom left, while the fp8
+// instruction runs at 325.2. This kernel is the same math on the fp8 instruction; the ceiling it is
+// chasing is the fp8 one.
 //
 // Numerics: this is a pure re-implementation of the Triton kernel's semantics -- the same fp32
 // accumulation, the same per-(1,128) activation scale and per-(128,128) weight scale applied inside
@@ -62,7 +62,24 @@ __global__ __launch_bounds__((BMF / 32) * 2 * 32) void radiance_fp8_block_wmma_g
   const int tid = threadIdx.x, lane = tid & 31, wave = tid >> 5;
   const int wm = wave >> 1, wn = wave & 1;
   const int col = lane & 15, kb8 = (lane >> 4) * 8;
-  const int m0 = blockIdx.y * BMF, n0 = blockIdx.x * BN;
+
+  // Grouped-M CTA swizzle (Triton's GROUP_SIZE_M). Walking N at fixed M -- the launch order --
+  // means every M-block re-streams the whole [N,K] weight from DRAM, because the weight does not
+  // fit the 8 MB L2: measured at M=2496 that is (M/BMF) * N * K bytes, e.g. 20 * 57.8 MB = 1156 MB
+  // for gate_up, 1820 us at 635 GB/s, which is exactly where both this kernel and Triton sat.
+  // Eight M-blocks grouped per weight slab keep the group's A tiles (8*128*K = 5.5 MB) plus one
+  // BN*K slab (344 KB) inside L2, so each weight byte is fetched once per group instead of once
+  // per M-block. A bijection on the tile grid, so it cannot change the arithmetic.
+  const int num_pid_m = (M + BMF - 1) / BMF;
+  const int num_pid_n = (N + BN - 1) / BN;
+  constexpr int GROUP_M = 8;
+  const int pid = blockIdx.x + blockIdx.y * gridDim.x;
+  const int in_group = pid % (GROUP_M * num_pid_n);
+  const int first_m = (pid / (GROUP_M * num_pid_n)) * GROUP_M;
+  int gsz = num_pid_m - first_m;
+  if (gsz > GROUP_M) gsz = GROUP_M;
+  const int m0 = (first_m + in_group % gsz) * BMF, n0 = (in_group / gsz) * BN;
+
   const int kgrp = K / WG_K;          // K/128 scale groups
   const int nb = n0 / WG_N;           // this CTA's weight n-block (BN=64 < WG_N=128, so it is unique)
 
