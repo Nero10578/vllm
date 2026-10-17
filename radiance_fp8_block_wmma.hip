@@ -91,24 +91,48 @@ __global__ __launch_bounds__((BMF / 32) * 2 * 32) void radiance_fp8_block_wmma_g
 #pragma unroll
       for (int e = 0; e < 8; ++e) { acc[i][j][e] = 0.f; tmp[i][j][e] = 0.f; }
 
+  // Register-staged double buffering of the K loop. Previously a slab's A and W went straight from
+  // global into LDS and then __syncthreads(), so the entire L2/DRAM latency of those loads was
+  // exposed once per slab -- and a slab is only four WMMA steps, on two CTAs per CU. Now the next
+  // slab is fetched into registers while the current slab computes and published to LDS only after
+  // the trailing barrier. Costs 2 uint4 for A and 1-2 for W.
+  constexpr int WPASSES = (BN * BK >= NTHREADS * 32) ? 2 : 1;
+  uint4_t Au0, Au1, Wu0, Wu1;
+  // Clamp, never predicate: a predicated staging load gets its own exec-mask region and defeats the
+  // counted load scheduling (see the MXFP4 kernel's note). Rows past M/N are dropped in the epilogue.
+#define LOAD_SLAB(kk0)                                                                       \
+  do {                                                                                       \
+    const int a0 = tid * 16, ar = a0 / BK, ac = a0 % BK;                                     \
+    const int arc = ar < M - 1 - m0 ? ar : M - 1 - m0;                                       \
+    Au0 = *(const uint4_t *)(A + (size_t)(m0 + arc) * K + (kk0) + ac);                        \
+    const int a1 = (NTHREADS + tid) * 16, br = a1 / BK, bc = a1 % BK;                         \
+    const int brc = br < M - 1 - m0 ? br : M - 1 - m0;                                       \
+    Au1 = *(const uint4_t *)(A + (size_t)(m0 + brc) * K + (kk0) + bc);                        \
+    const int w0 = tid * 16, wr = w0 / BK, wc = w0 % BK;                                     \
+    const int wrc = wr < N - 1 - n0 ? wr : N - 1 - n0;                                       \
+    Wu0 = *(const uint4_t *)(W + (size_t)(n0 + wrc) * K + (kk0) + wc);                        \
+    if (WPASSES > 1) {                                                                       \
+      const int w1 = (NTHREADS + tid) * 16, xr = w1 / BK, xc = w1 % BK;                       \
+      const int xrc = xr < N - 1 - n0 ? xr : N - 1 - n0;                                     \
+      Wu1 = *(const uint4_t *)(W + (size_t)(n0 + xrc) * K + (kk0) + xc);                      \
+    }                                                                                        \
+  } while (0)
+
+  LOAD_SLAB(0);
+
   for (int k0 = 0; k0 < K; k0 += BK) {
-    {   // A tile: BMF*BK bytes, 32 B per thread. Clamp, never predicate -- a predicated staging
-        // load gets its own exec-mask region and defeats the counted s_wait_loadcnt (see the
-        // MXFP4 kernel's note); the epilogue already drops rows past M.
-      const int r = tid >> 1, off = (tid & 1) * 32;
-      const int rc = r < M - 1 - m0 ? r : M - 1 - m0;
-      const unsigned char *src = A + (size_t)(m0 + rc) * K + k0 + off;
-      *(uint4_t *)(&sA[r * ASTR + off]) = *(const uint4_t *)(src);
-      *(uint4_t *)(&sA[r * ASTR + off + 16]) = *(const uint4_t *)(src + 16);
+    {
+      const int a0 = tid * 16, r0 = a0 / BK, c0 = a0 % BK;
+      *(uint4_t *)(&sA[r0 * ASTR + c0]) = Au0;
+      const int a1 = (NTHREADS + tid) * 16, r1 = a1 / BK, c1 = a1 % BK;
+      *(uint4_t *)(&sA[r1 * ASTR + c1]) = Au1;
     }
-    {   // W tile: BN*BK bytes, 16 B per thread per pass. Already e4m3 -- plain copy, no fold.
-        // Loop, not a fixed `r = tid >> 2`: the tile is 4096 B and the BMF=64 instantiation has
-        // only 128 threads, so a single-pass form would stage half of it.
-      for (int idx = tid * 16; idx < BN * BK; idx += NTHREADS * 16) {
-        const int r = idx / BK, c = idx % BK;
-        const int rc = r < N - 1 - n0 ? r : N - 1 - n0;
-        *(uint4_t *)(&sW[r * WSTR + c]) =
-            *(const uint4_t *)(W + (size_t)(n0 + rc) * K + k0 + c);
+    {
+      const int w0 = tid * 16, r0 = w0 / BK, c0 = w0 % BK;
+      *(uint4_t *)(&sW[r0 * WSTR + c0]) = Wu0;
+      if (WPASSES > 1) {
+        const int w1 = (NTHREADS + tid) * 16, r1 = w1 / BK, c1 = w1 % BK;
+        *(uint4_t *)(&sW[r1 * WSTR + c1]) = Wu1;
       }
     }
     // Activation scales for this CTA's rows at the k-group k0/128 (two BK slabs share a group).
@@ -119,31 +143,57 @@ __global__ __launch_bounds__((BMF / 32) * 2 * 32) void radiance_fp8_block_wmma_g
     }
     __syncthreads();
 
+    // Issue the next slab's global loads now, before the matrix work: they retire into registers
+    // while this slab computes and are published to LDS on the next iteration.
+    if (k0 + BK < K) LOAD_SLAB(k0 + BK);
+
     // One weight scale for the whole CTA: BN=64 columns lie inside a single 128-wide n-block.
     const float bsc = Bs[(size_t)nb * kgrp + kb];
 
+    // One-step software pipeline. Each 16-wide step issues only four WMMAs, so a load-then-barrier
+    // -then-WMMA sequence exposes the whole LDS latency every step and the matrix pipe idles; the
+    // MXFP4 kernel hid the same latency by amortising it over eight WMMAs per step. Prefetch step
+    // s+1's fragments while step s issues, and let the scheduler interleave (no blanket
+    // sched_barrier -- the explicit two-stage structure already bounds hoisting to one step).
+    int2_t af[2], wf[2];
+#pragma unroll
+    for (int i = 0; i < 2; ++i) {
+      const unsigned char *p = &sA[(wm * 32 + i * 16 + col) * ASTR + kb8];
+      af[i][0] = *(const int *)p; af[i][1] = *(const int *)(p + 4);
+    }
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+      const unsigned char *p = &sW[(wn * 32 + j * 16 + col) * WSTR + kb8];
+      wf[j][0] = *(const int *)p; wf[j][1] = *(const int *)(p + 4);
+    }
+
 #pragma unroll
     for (int step = 0; step < BK / 16; ++step) {
-      const int kk = step * 16 + kb8;
-      int2_t af[2], wf[2];
+      int2_t naf[2], nwf[2];
+      if (step + 1 < BK / 16) {
+        const int nk = (step + 1) * 16 + kb8;
 #pragma unroll
-      for (int i = 0; i < 2; ++i) {
-        const unsigned char *p = &sA[(wm * 32 + i * 16 + col) * ASTR + kk];
-        af[i][0] = *(const int *)p; af[i][1] = *(const int *)(p + 4);
-      }
+        for (int i = 0; i < 2; ++i) {
+          const unsigned char *p = &sA[(wm * 32 + i * 16 + col) * ASTR + nk];
+          naf[i][0] = *(const int *)p; naf[i][1] = *(const int *)(p + 4);
+        }
 #pragma unroll
-      for (int j = 0; j < 2; ++j) {
-        const unsigned char *p = &sW[(wn * 32 + j * 16 + col) * WSTR + kk];
-        wf[j][0] = *(const int *)p; wf[j][1] = *(const int *)(p + 4);
+        for (int j = 0; j < 2; ++j) {
+          const unsigned char *p = &sW[(wn * 32 + j * 16 + col) * WSTR + nk];
+          nwf[j][0] = *(const int *)p; nwf[j][1] = *(const int *)(p + 4);
+        }
       }
-      // Scheduling barrier per k-step, or the compiler hoists every step's fragment loads above
-      // the first WMMA and holds four steps of fragments live (see the MXFP4 kernel).
-      __builtin_amdgcn_sched_barrier(0);
 #pragma unroll
       for (int i = 0; i < 2; ++i)
 #pragma unroll
         for (int j = 0; j < 2; ++j)
           tmp[i][j] = __builtin_amdgcn_wmma_f32_16x16x16_fp8_fp8_w32_gfx12(af[i], wf[j], tmp[i][j]);
+      if (step + 1 < BK / 16) {
+#pragma unroll
+        for (int i = 0; i < 2; ++i) { af[i][0] = naf[i][0]; af[i][1] = naf[i][1]; }
+#pragma unroll
+        for (int j = 0; j < 2; ++j) { wf[j][0] = nwf[j][0]; wf[j][1] = nwf[j][1]; }
+      }
     }
     // The block scale is constant over the whole WG_K=128 group, which spans TWO BK=64 slabs. So
     // accumulate both slabs into tmp and fold them into acc once, on the group's second slab:
