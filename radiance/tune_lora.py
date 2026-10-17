@@ -19,21 +19,21 @@ It drives the production ops (``torch.ops.vllm.lora_shrink`` /
 the server runs.
 
 Every candidate config is a distinct Triton program and must be JIT-compiled
-before it can be timed, so the runtime is dominated by the size of the search
-space (not by the kernels). Use ``--smoke`` to confirm the path works, then
-``--quick`` or a narrowed ``--lora-ranks`` for a fast real run.
+before it can be timed, so runtime is dominated by the size of the search
+space, not by the kernels. Jobs are independent, so they are sharded across
+all visible GPUs with ``multiprocessing`` (spawn), one worker per device.
 
-Run on the serving box, one GPU visible::
+Run on the serving box with all target GPUs visible::
 
-    HIP_VISIBLE_DEVICES=0 \
     VLLM_TUNED_CONFIG_FOLDER=/home/arli/vllm-radiance-bm \
     .venv/bin/python radiance/tune_lora.py \
-        --hidden-sizes 5376 --lora-ranks 16 32 64 128 \
+        --hidden-sizes 5376 --lora-dir /home/arli/loras-gemma \
         --max-loras 3 --batch-sizes 1 2 4 8 16 32
 """
 
 import argparse
 import json
+import multiprocessing as mp
 import os
 from pathlib import Path
 
@@ -117,14 +117,14 @@ def time_fn(fn, warmup: int, iters: int) -> float:
     return start.elapsed_time(end) / iters * 1000.0
 
 
-def _attempt(tag: str, fn) -> float | None:
+def _attempt(tag: str, fn) -> bool:
     try:
         fn()
         torch.cuda.synchronize()
-    except Exception as exc:  # noqa: BLE001 - first failure is reported, rest skipped
+    except Exception as exc:  # noqa: BLE001 - first failure reported, rest skipped
         _FIRST_ERROR.setdefault(tag, f"{type(exc).__name__}: {exc}")
-        return None
-    return 0.0
+        return False
+    return True
 
 
 def tune_shrink(
@@ -142,8 +142,7 @@ def tune_shrink(
     for config in space:
         lora_shrink_op.get_lora_op_configs = lambda *a, _c=config, **k: _c
         fn = lambda: lora_shrink(inputs, lora_a, output, *metadata, 1.0)
-        us = _attempt("shrink", fn)
-        if us is None:
+        if not _attempt("shrink", fn):
             continue
         us = time_fn(fn, warmup, iters)
         if us < best_us:
@@ -168,8 +167,7 @@ def tune_expand(
     for config in space:
         lora_expand_op.get_lora_op_configs = lambda *a, _c=config, **k: _c
         fn = lambda: lora_expand(inputs, lora_b, output, *metadata, 0, add_inputs)
-        us = _attempt("expand", fn)
-        if us is None:
+        if not _attempt("expand", fn):
             continue
         us = time_fn(fn, warmup, iters)
         if us < best_us:
@@ -185,6 +183,14 @@ def nested(data: dict, path: list) -> dict:
     return node
 
 
+def merge(dst: dict, src: dict) -> None:
+    for key, val in src.items():
+        if isinstance(val, dict):
+            merge(dst.setdefault(key, {}), val)
+        else:
+            dst[key] = val
+
+
 def ranks_from_dir(path: str) -> list[int]:
     ranks = set()
     for cfg in Path(path).glob("*/adapter_config.json"):
@@ -192,6 +198,36 @@ def ranks_from_dir(path: str) -> list[int]:
         if "r" in data:
             ranks.add(int(data["r"]))
     return sorted(ranks)
+
+
+def run_jobs(gpu_id: int, jobs: list, params: dict):
+    torch.cuda.init()
+    torch.cuda.set_device(gpu_id)
+    dtype = DTYPE_MAP[params["dtype"]]
+    quick = params["quick"]
+    shrink_space_list = list(shrink_space(quick))
+    expand_space_list = list(expand_space(quick))
+
+    shrink_data: dict = {}
+    expand_data = {True: {}, False: {}}
+
+    for kind, hidden, rank, num_slices, m, add_inputs in tqdm(
+        jobs, desc=f"GPU {gpu_id}", leave=False
+    ):
+        if kind == "shrink":
+            cfg = tune_shrink(hidden, rank, num_slices, m, params["max_loras"],
+                              dtype, "cuda", shrink_space_list,
+                              params["warmup"], params["iters"])
+            if cfg is not None:
+                nested(shrink_data, [params["max_loras"], num_slices, m, hidden, rank]).update(cfg)
+        else:
+            cfg = tune_expand(hidden, rank, num_slices, m, params["max_loras"],
+                              add_inputs, dtype, "cuda", expand_space_list,
+                              params["warmup"], params["iters"])
+            if cfg is not None:
+                nested(expand_data[add_inputs], [params["max_loras"], num_slices, m, rank, hidden]).update(cfg)
+
+    return shrink_data, expand_data[True], expand_data[False], dict(_FIRST_ERROR)
 
 
 def main() -> None:
@@ -213,9 +249,14 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument(
+        "--num-gpus",
+        type=int,
+        help="Number of GPUs to shard across (default: all visible).",
+    )
+    parser.add_argument(
         "--smoke",
         action="store_true",
-        help="Run one config on one key per op, print the result, and exit.",
+        help="Run one config on one key per op on GPU 0, print, and exit.",
     )
     parser.add_argument(
         "--output-dir", default=os.environ.get("VLLM_TUNED_CONFIG_FOLDER")
@@ -229,7 +270,6 @@ def main() -> None:
         if found:
             args.lora_ranks = found
 
-    dtype = DTYPE_MAP[args.dtype]
     torch.cuda.init()
     torch.accelerator.set_device_index(0)
     gpu = torch.cuda.get_device_name().replace(" ", "_").replace("-", "_")
@@ -239,20 +279,15 @@ def main() -> None:
           f"slices={args.num_slices} max_loras={args.max_loras} m={args.batch_sizes}")
     print(f"[tune_lora] output_dir={args.output_dir}")
 
-    shrink_data: dict = {}
-    expand_data = {True: {}, False: {}}
-
     if args.smoke:
-        h = args.hidden_sizes[0]
-        r = args.lora_ranks[0]
-        print("[smoke] running one shrink + one expand config...")
-        cfg = tune_shrink(h, r, 1, 1, args.max_loras, dtype, "cuda",
+        h, r = args.hidden_sizes[0], args.lora_ranks[0]
+        print("[smoke] running one shrink + one expand config on GPU 0...")
+        cfg = tune_shrink(h, r, 1, 1, args.max_loras, DTYPE_MAP[args.dtype], "cuda",
                           list(shrink_space(True))[:1], 1, 1)
         print(f"[smoke] shrink {'-> ' + str(cfg) if cfg else 'FAILED: ' + _FIRST_ERROR.get('shrink', '')}")
-        cfg = tune_expand(h, r, 1, 1, args.max_loras, True, dtype, "cuda",
+        cfg = tune_expand(h, r, 1, 1, args.max_loras, True, DTYPE_MAP[args.dtype], "cuda",
                           list(expand_space(True))[:1], 1, 1)
         print(f"[smoke] expand {'-> ' + str(cfg) if cfg else 'FAILED: ' + _FIRST_ERROR.get('expand', '')}")
-        print("[smoke] done")
         return
 
     jobs = []
@@ -264,34 +299,51 @@ def main() -> None:
                     jobs.append(("expand", hidden, rank, num_slices, m, True))
                     jobs.append(("expand", hidden, rank, num_slices, m, False))
 
+    num_gpus = args.num_gpus or torch.cuda.device_count()
+    num_gpus = max(1, min(num_gpus, torch.cuda.device_count()))
+    shards = [jobs[i::num_gpus] for i in range(num_gpus)]
+
     n_shrink = len(list(shrink_space(args.quick)))
     n_expand = len(list(expand_space(args.quick)))
-    print(f"[tune_lora] {len(jobs)} jobs; ~{n_shrink} shrink + ~{n_expand} expand "
-          f"configs/compile each (this is the runtime driver)")
+    print(f"[tune_lora] {len(jobs)} jobs across {num_gpus} GPUs "
+          f"(~{n_shrink} shrink + ~{n_expand} expand compiles/config)")
+    for i, shard in enumerate(shards):
+        print(f"[tune_lora]   GPU {i}: {len(shard)} jobs")
 
-    for kind, hidden, rank, num_slices, m, add_inputs in tqdm(jobs, desc="tuning"):
-        if kind == "shrink":
-            cfg = tune_shrink(hidden, rank, num_slices, m, args.max_loras, dtype,
-                              "cuda", shrink_space(args.quick), args.warmup, args.iters)
-            if cfg is not None:
-                nested(shrink_data, [args.max_loras, num_slices, m, hidden, rank]).update(cfg)
-                tqdm.write(f"[shrink] h={hidden} r={rank} slices={num_slices} m={m} -> {cfg}")
-        else:
-            cfg = tune_expand(hidden, rank, num_slices, m, args.max_loras, add_inputs,
-                              dtype, "cuda", expand_space(args.quick), args.warmup, args.iters)
-            if cfg is not None:
-                nested(expand_data[add_inputs], [args.max_loras, num_slices, m, rank, hidden]).update(cfg)
-                tqdm.write(f"[expand={add_inputs}] h={hidden} r={rank} slices={num_slices} m={m} -> {cfg}")
+    params = {
+        "dtype": args.dtype,
+        "max_loras": args.max_loras,
+        "warmup": args.warmup,
+        "iters": args.iters,
+        "quick": args.quick,
+    }
 
-    for tag, msg in _FIRST_ERROR.items():
-        print(f"[tune_lora] WARNING all {tag} attempts failed; first error: {msg}")
+    shrink_data: dict = {}
+    expand_true: dict = {}
+    expand_false: dict = {}
+
+    if num_gpus == 1:
+        results = [run_jobs(0, shards[0], params)]
+    else:
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(num_gpus) as pool:
+            results = pool.starmap(
+                run_jobs, [(i, shards[i], params) for i in range(num_gpus)]
+            )
+
+    for s, et, ef, errs in results:
+        merge(shrink_data, s)
+        merge(expand_true, et)
+        merge(expand_false, ef)
+        for tag, msg in errs.items():
+            print(f"[tune_lora] WARNING all {tag} attempts failed; first error: {msg}")
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     for name, data in (
         (f"{gpu}_SHRINK.json", shrink_data),
-        (f"{gpu}_EXPAND_TRUE.json", expand_data[True]),
-        (f"{gpu}_EXPAND_FALSE.json", expand_data[False]),
+        (f"{gpu}_EXPAND_TRUE.json", expand_true),
+        (f"{gpu}_EXPAND_FALSE.json", expand_false),
     ):
         path = out / name
         path.write_text(json.dumps(data, indent=4) + "\n")
