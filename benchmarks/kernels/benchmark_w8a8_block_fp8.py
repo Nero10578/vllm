@@ -163,7 +163,27 @@ def get_xpu_tuning_space():
     return configs
 
 
-def get_weight_shapes(tp_size):
+# Gemma-4-31B-it (W8A8 block FP8) per-rank GEMM shapes at TP4, in (N, K)
+# order. These are the shapes the fp8 block kernel reports as missing a
+# tuned config when serving the FP8-block checkpoint at TP4.
+GEMMA4_31B_TP4_SHAPES = [
+    (4096, 5376),
+    (5376, 2048),
+    (10752, 5376),
+    (5376, 5376),
+    (5120, 5376),
+    (5376, 4096),
+]
+
+
+def get_weight_shapes(tp_size, model="deepseek-v3"):
+    if model == "gemma-4-31b":
+        if tp_size != 4:
+            raise ValueError(
+                "gemma-4-31b shapes are defined at TP4; pass --tp-size 4."
+            )
+        return list(GEMMA4_31B_TP4_SHAPES)
+
     # NOTE(HandH1998): The weight shapes only works for DeepSeek-V3.
     # Modify them, if you tune for another different model.
     # cannot TP
@@ -402,7 +422,7 @@ def main(args):
         batch_sizes = [args.batch_size]
         num_gpus = 1  # If only one batch size, use only one GPU
 
-    weight_shapes = get_weight_shapes(args.tp_size)
+    weight_shapes = get_weight_shapes(args.tp_size, args.model)
 
     batches_per_gpu = distribute_batch_sizes(batch_sizes, num_gpus)
 
@@ -435,6 +455,13 @@ Then copy to model_executor/layers/quantization/utils/configs
     )
 
     parser.add_argument("--tp-size", "-tp", type=int, default=8)
+    parser.add_argument(
+        "--model",
+        type=str,
+        choices=["deepseek-v3", "gemma-4-31b"],
+        default="deepseek-v3",
+        help="Weight-shape set to tune (default: DeepSeek-V3).",
+    )
     parser.add_argument("--input-type", type=str, choices=["fp8"], default="fp8")
     parser.add_argument(
         "--out-dtype",
