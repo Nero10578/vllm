@@ -70,36 +70,41 @@ def shrink_space(quick: bool):
     # split_k matters with m: vLLM's default uses split_k=64 for small batches
     # and 8 for m>=128, so both must be in the grid for prefill-sized m.
     if quick:
-        blocks_m, blocks_n, split_ks = (32, 64, 128), (16, 32), (8, 64)
+        blocks_m, blocks_n = (32, 64, 128), (16, 32)
+        blocks_k, split_ks, stages = (128, 256), (8, 64), (2,)
     else:
-        blocks_m, blocks_n, split_ks = (16, 32, 64, 128), (16, 32, 64), (1, 8, 64)
+        blocks_m, blocks_n = (16, 32, 64, 128), (16, 32, 64, 128)
+        blocks_k, split_ks, stages = (64, 128, 256), (1, 8, 64), (1, 2, 3)
     for block_m in blocks_m:
         for block_n in blocks_n:
-            for block_k in (128, 256):
+            for block_k in blocks_k:
                 for split_k in split_ks:
                     for num_warps in (4, 8):
-                        yield {
-                            "block_m": block_m,
-                            "block_n": block_n,
-                            "block_k": block_k,
-                            "split_k": split_k,
-                            "num_warps": num_warps,
-                            "num_stages": 2,
-                            "num_ctas": 1,
-                            "group_size_m": 8,
-                        }
+                        for num_stages in stages:
+                            yield {
+                                "block_m": block_m,
+                                "block_n": block_n,
+                                "block_k": block_k,
+                                "split_k": split_k,
+                                "num_warps": num_warps,
+                                "num_stages": num_stages,
+                                "num_ctas": 1,
+                                "group_size_m": 8,
+                            }
 
 
 def expand_space(quick: bool):
     if quick:
         blocks_m, blocks_n = (32, 64, 128), (64, 128)
+        blocks_k, stages = (32, 64), (2, 3)
     else:
-        blocks_m, blocks_n = (16, 32, 64, 128), (32, 64, 128)
+        blocks_m, blocks_n = (16, 32, 64, 128), (32, 64, 128, 256)
+        blocks_k, stages = (16, 32, 64, 128), (1, 2, 3)
     for block_m in blocks_m:
         for block_n in blocks_n:
-            for block_k in (32, 64):
+            for block_k in blocks_k:
                 for num_warps in (4, 8):
-                    for num_stages in (2, 3):
+                    for num_stages in stages:
                         yield {
                             "block_m": block_m,
                             "block_n": block_n,
@@ -308,7 +313,12 @@ def main() -> None:
     parser.add_argument("--dtype", choices=list(DTYPE_MAP), default="bfloat16")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
-    parser.add_argument("--quick", action="store_true")
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Use a reduced candidate grid (fewer Triton compiles) at the "
+        "risk of missing the fastest tile. Omit for a best-effort search.",
+    )
     parser.add_argument(
         "--lds-kb",
         type=int,
