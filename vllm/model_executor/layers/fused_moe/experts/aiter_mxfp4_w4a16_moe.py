@@ -135,11 +135,13 @@ def aiter_triton_kernel_w4a16_moe_forward(
     routed_scaling_factor: float | None = None,
     score_mode: str | None = None,
 ):
-    assert quant_config is not None and rocm_aiter_ops.is_enabled()
+    assert quant_config is not None and (
+        rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_fused_moe_enabled()
+    )
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         should_use_cdna4_mx_scale_swizzle,
     )
-    from vllm.platforms.rocm import on_gfx950, on_gfx1250
+    from vllm.platforms.rocm import on_gfx12x, on_gfx950, on_gfx1250
 
     try:
         from aiter.ops.triton.moe.moe_op_gemm_a16w4 import moe_gemm_a16w4
@@ -240,7 +242,8 @@ def aiter_triton_kernel_w4a16_moe_forward(
     # picks it) calls a Triton-Gluon AMD API that isn't available in vLLM's
     # pinned Triton, so force the Triton backend on gfx950. gfx1250 already
     # used Gluon before this and is unaffected, so leave it on auto-detect.
-    a16w4_backend = "triton" if on_gfx950() else None
+    # gfx12x (RDNA4) has no CK/Gluon build; force the portable Triton backend.
+    a16w4_backend = "triton" if (on_gfx950() or on_gfx12x()) else None
 
     intermediate = moe_gemm_a16w4(
         hidden_states,
@@ -304,10 +307,18 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
+        from vllm.platforms.rocm import (
+            on_gfx12x,
+            on_gfx942,
+            on_gfx950,
+            on_gfx1250,
+        )
+
+        if on_gfx12x():
+            # RDNA4 has no AITER CK build; only the Triton MoE kernels apply.
+            return rocm_aiter_ops.is_rdna_fused_moe_enabled()
         if not rocm_aiter_ops.is_enabled():
             return False
-        from vllm.platforms.rocm import on_gfx942, on_gfx950, on_gfx1250
-
         return on_gfx942() or on_gfx950() or on_gfx1250()
 
     @staticmethod

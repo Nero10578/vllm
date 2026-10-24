@@ -2184,6 +2184,11 @@ class rocm_aiter_ops:
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
+    def is_rdna_fused_moe_enabled(cls) -> bool:
+        """RDNA4 (gfx12) analog of is_fused_moe_enabled() for Triton MoE kernels."""
+        return cls.is_rdna_aiter_enabled() and cls._FMOE_ENABLED
+
+    @classmethod
     @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED

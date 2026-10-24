@@ -428,6 +428,15 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx12x
+
+        if on_gfx12x():
+            # RDNA4 has no AITER CK build; use the portable Triton A16W4 MoE
+            # backend instead of dequantizing every expert through amd-quark.
+            return [
+                Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
+                Mxfp4MoeBackend.EMULATION,
+            ]
         return [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.EMULATION,
