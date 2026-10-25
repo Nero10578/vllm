@@ -459,10 +459,14 @@ def install_attn_config_hook():
         max_seqlen_q = a[4] if len(a) > 4 else k.get("max_seqlen_q", 0)
         num_queries_per_kv = a[6] if len(a) > 6 else k.get("num_queries_per_kv", 1)
         kv_dtype = a[9] if len(a) > 9 else k.get("kv_cache_dtype")
+        # Same as the aiter >= 0.1.21 path: the per-head-size table depends on the head
+        # width, not the cache dtype.
+        large_prefill = max_seqlen_q >= 256
         if kv_dtype in TWO_BYTE:                 # bf16/auto KV: warps=4 is decisive on large prefill
             c["TILE_SIZE"] = 16; c["num_warps"] = 4; c["num_stages"] = 1; c["waves_per_eu"] = 1
-        elif max_seqlen_q >= 256:                # fp8 large prefill
+        elif large_prefill:                      # fp8 large prefill
             c["TILE_SIZE"] = 16; c["waves_per_eu"] = 1
+        if large_prefill:
             tuned = _PREFILL_2D_BY_HEAD.get(head_size)
             if tuned is not None:
                 c.update(tuned)

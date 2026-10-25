@@ -342,6 +342,20 @@ class Attention(nn.Module, AttentionLayerBase):
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
         self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
+        if (
+            self.use_mm_prefix
+            and sliding_window is None
+            and getattr(
+                model_config.hf_text_config, "use_bidirectional_attention", None
+            )
+            == "vision"
+        ):
+            # Gemma4 applies bidirectional image attention only to its sliding
+            # layers; the model clears mm_prefix_range on full-attention layers
+            # every forward (gemma4_mm._clear_mm_prefix_for_full_attn_layers).
+            # Those layers are plain causal, so they may use a backend without
+            # mm_prefix support (e.g. ROCM_AITER_UNIFIED_ATTN).
+            self.use_mm_prefix = False
 
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
