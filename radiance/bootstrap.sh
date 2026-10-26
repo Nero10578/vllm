@@ -170,6 +170,17 @@ if ! "$PY" -c 'import amdsmi' >/dev/null 2>&1; then
       break
     fi
   done
+  if [ -z "$AMD_SMI_SRC" ]; then
+    # Last resort: the deb layouts move the python package around, so scan the SDK
+    # trees for an importable package directory.
+    while IFS= read -r pkgdir; do
+      if [ -f "$pkgdir/__init__.py" ]; then
+        AMD_SMI_SRC="$(dirname "$pkgdir")"
+        break
+      fi
+    done < <(find "$ROCM_ROOT" /opt/rocm -maxdepth 6 -type d \
+      \( -name amdsmi -o -name amd_smi \) 2>/dev/null || true)
+  fi
   if [ -n "$AMD_SMI_SRC" ]; then
     echo "amdsmi source: $AMD_SMI_SRC"
     TMP_SMI="$(mktemp -d)"
