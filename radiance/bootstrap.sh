@@ -16,7 +16,8 @@
 #   skip      : a matched torch/triton stack is already importable
 #
 # Prerequisites on the host:
-#   * ROCm 10.1 userspace + `amdrocm-core-dev10.1` (hipcc on PATH)
+#   * ROCm 10.1 userspace + `amdrocm-core-dev10.1` (hipcc on PATH, and a
+#     hip-lang-config.cmake the vLLM CMake build can find)
 #   * uv (https://docs.astral.sh/uv/)
 #   * git, a C++ toolchain, python3.12 available to uv
 #
@@ -79,8 +80,34 @@ command -v uv  >/dev/null || die "uv not found on PATH"
 command -v git >/dev/null || die "git not found on PATH"
 [ -d "$ROCM_ROOT" ] || warn "ROCm root $ROCM_ROOT does not exist; native steps will fail"
 
-export ROCM_PATH="$ROCM_ROOT"
-export HIP_PATH="$ROCM_ROOT"
+# CMake's HIP language support requires hip-lang-config.cmake, which ROCm 10 can keep
+# outside the versioned SDK tree (the cmake package often lives in the unversioned
+# /opt/rocm while the libs live in core-10.<minor>). ROCM_PATH/HIP_PATH must name the
+# root that actually has it; ROCM_ROOT keeps naming the tree used for libraries
+# (LLVM dedup, loader path).
+ROCM_HOME="${RADIANCE_ROCM_HOME:-}"
+if [ -z "$ROCM_HOME" ]; then
+  for root in "$ROCM_ROOT" /opt/rocm; do
+    for d in lib lib64 lib/x86_64-unknown-linux-gnu; do
+      if [ -f "$root/$d/cmake/hip-lang/hip-lang-config.cmake" ]; then
+        ROCM_HOME="$root"
+        break 2
+      fi
+    done
+  done
+fi
+if [ -z "$ROCM_HOME" ]; then
+  if [ "${RADIANCE_SKIP_FORK:-0}" = "1" ]; then
+    warn "no hip-lang-config.cmake under $ROCM_ROOT or /opt/rocm; the fork build is skipped anyway"
+    ROCM_HOME="$ROCM_ROOT"
+  else
+    die "no hip-lang-config.cmake under $ROCM_ROOT or /opt/rocm; install the ROCm dev package (e.g. amdrocm-core-dev10.1) or set RADIANCE_ROCM_HOME"
+  fi
+fi
+echo "ROCm libs: $ROCM_ROOT | ROCm cmake/HIP: $ROCM_HOME"
+
+export ROCM_PATH="$ROCM_HOME"
+export HIP_PATH="$ROCM_HOME"
 export PYTORCH_ROCM_ARCH="$GFX_ARCH"
 export RADIANCE_GFX_ARCH="$GFX_ARCH"
 export VLLM_TARGET_DEVICE=rocm
@@ -89,7 +116,9 @@ export TRITON_USE_ROCM=1
 export TORCH_BLAS_PREFER_HIPBLASLT=1
 # Native artifacts (r4d.so, radiance_mxfp4_fp8.so) link libamdhip64.so.7; without both
 # ROCm lib dirs on the loader path, importing them fails during the build/verify steps.
-export LD_LIBRARY_PATH="/opt/rocm/lib:$ROCM_ROOT/lib:${LD_LIBRARY_PATH:-}"
+ROCM_LIBS="/opt/rocm/lib:$ROCM_ROOT/lib"
+[ "$ROCM_HOME" = "$ROCM_ROOT" ] || ROCM_LIBS="$ROCM_LIBS:$ROCM_HOME/lib"
+export LD_LIBRARY_PATH="$ROCM_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # -----------------------------------------------------------------------------
 log "uv venv ($VENV)"
@@ -98,6 +127,15 @@ PY="$VENV/bin/python"
 [ -x "$PY" ] || die "venv python missing at $PY"
 SP="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 echo "site-packages: $SP"
+
+# The vLLM build needs the CPython development headers: CMake's FindPython asks for
+# Development.Module/Development.SABIModule, and without Python.h the configure step
+# fails after the whole stack download. uv-managed pythons ship headers; distro
+# pythons need the -dev package.
+PYVER="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+if ! "$PY" -c 'import os, sysconfig; raise SystemExit(0 if os.path.exists(os.path.join(sysconfig.get_paths()["include"], "Python.h")) else 1)'; then
+  die "python${PYVER} development headers missing (Python.h not found); install them (e.g. sudo apt install python${PYVER}-dev) or point RADIANCE_PYTHON at a python that ships headers"
+fi
 
 # A venv that already went through the ROCm LLVM dedup has _rocm_sdk_*/lib symlinked
 # into the (root-owned) system ROCm tree. uv can no longer uninstall/reinstall the
@@ -120,17 +158,46 @@ fi
 if ! "$PY" -c 'import amdsmi' >/dev/null 2>&1; then
   log "amdsmi"
   AMD_SMI_SRC=""
-  for cand in "$ROCM_ROOT/share/amd_smi" /opt/rocm/share/amd_smi /opt/rocm/core-10.1/share/amd_smi; do
-    [ -d "$cand" ] && { AMD_SMI_SRC="$cand"; break; }
+  # The module is `amdsmi`; the source/package directory is `amd_smi` in some ROCm
+  # layouts and `amdsmi` in others. Accept a source tree (setup.py/pyproject.toml) or
+  # a directory that only holds the package (share/amd_smi, or a lib/python*/site-packages).
+  for cand in "$ROCM_ROOT/share/amd_smi" "$ROCM_HOME/share/amd_smi" /opt/rocm/share/amd_smi \
+              "$ROCM_ROOT"/lib/python*/site-packages; do
+    [ -d "$cand" ] || continue
+    if [ -f "$cand/setup.py" ] || [ -f "$cand/pyproject.toml" ] \
+       || [ -d "$cand/amd_smi" ] || [ -d "$cand/amdsmi" ]; then
+      AMD_SMI_SRC="$cand"
+      break
+    fi
   done
   if [ -n "$AMD_SMI_SRC" ]; then
+    echo "amdsmi source: $AMD_SMI_SRC"
     TMP_SMI="$(mktemp -d)"
-    cp -r "$AMD_SMI_SRC/." "$TMP_SMI/"
-    uv pip install --python "$PY" "$TMP_SMI" || warn "amdsmi install failed"
+    if [ -f "$AMD_SMI_SRC/setup.py" ] || [ -f "$AMD_SMI_SRC/pyproject.toml" ]; then
+      cp -r "$AMD_SMI_SRC/." "$TMP_SMI/"
+      uv pip install --python "$PY" "$TMP_SMI" || warn "amdsmi install failed"
+    else
+      # Package-only layout: copy just the package and synthesize the missing build
+      # metadata so uv records a dist-info instead of an untracked directory.
+      for pkg in amd_smi amdsmi; do
+        [ -d "$AMD_SMI_SRC/$pkg" ] && cp -r "$AMD_SMI_SRC/$pkg" "$TMP_SMI/"
+      done
+      if [ -n "$(ls -A "$TMP_SMI")" ]; then
+        cat > "$TMP_SMI/setup.py" <<'PY'
+from setuptools import find_packages, setup
+
+setup(name="amdsmi", version="0.0.0", packages=find_packages())
+PY
+        uv pip install --python "$PY" "$TMP_SMI" || warn "amdsmi install failed"
+      else
+        warn "no amdsmi python package in $AMD_SMI_SRC (contents: $(ls -A "$AMD_SMI_SRC" | tr '\n' ' '))"
+      fi
+    fi
     rm -rf "$TMP_SMI"
     "$PY" -c 'import amdsmi; print("amdsmi OK")' || warn "amdsmi import failed"
   else
-    warn "amd_smi source not found under $ROCM_ROOT/share or /opt/rocm/share"
+    warn "no amd_smi tree under $ROCM_ROOT/share, $ROCM_HOME/share or /opt/rocm/share"
+    warn "check: ls -A $ROCM_ROOT/share/amd_smi; ls -d $ROCM_ROOT/lib/python*/site-packages/amdsmi"
   fi
 else
   log "amdsmi already importable"

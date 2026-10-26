@@ -33,11 +33,17 @@ can't live in the vLLM source tree.
 ## 1. Host prerequisites (once)
 
 ```bash
-# ROCm 10.1 userspace + developer headers (hipcc), plus the build toolchain
+# ROCm 10.1 userspace + developer headers (hipcc), plus the build toolchain.
+# The runtime metapackage (amdrocm10.1-gfx1201) does NOT ship headers or
+# hip-lang-config.cmake, so install the matching gfx1201 dev metapackage.
 sudo apt update
-sudo apt install -y amdrocm-core-dev10.1 build-essential python3.12-dev g++ git
+sudo apt install -y amdrocm-core-dev10.1-gfx1201 build-essential python3.12-dev g++ git
+# HIP-only minimum: amdrocm-runtime-dev10.1 (hip-lang cmake + HIP headers)
+# if the gfx name is not in your repo: apt-cache search amdrocm | grep -i dev
 
 which hipcc && hipcc --version          # must be on PATH
+ls /usr/include/python3.12/Python.h     # python3.12-dev: the vLLM CMake step needs it
+find /opt/rocm -name 'hip-lang-config.cmake'   # the vLLM CMake build needs this too
 rocm-smi                                # confirm the R9700s are visible
 find /opt/rocm -name 'libamdhip64*'     # note where the HIP runtime lives
 
@@ -109,6 +115,7 @@ radiance runtime modules OK
 ```
 RADIANCE_VENV=/path/.venv
 RADIANCE_ROCM_ROOT=/opt/rocm/core-10.1
+RADIANCE_ROCM_HOME=/opt/rocm             # root with lib/cmake/hip-lang (auto-detected)
 RADIANCE_ROCM_WHEEL_TAG=rocm10.1.0       # AMD wheel local-version tag (+rocm10.1.0)
 RADIANCE_INSTALL_MODE=wheel|editable     # default wheel
 RADIANCE_INSTALL_AITER=1                 # opt-in; see section 6
@@ -365,7 +372,7 @@ them if you see them, or if you're on an older checkout.
 | # | Symptom | Cause | Fix (now automatic) |
 |---|---|---|---|
 | 1 | `error: failed to remove file …/_rocm_sdk_libraries/lib/…: Permission denied (os error 13)` | Ran a stack (re)install into a venv already LLVM-deduped; uv tried to remove root-owned `/opt/rocm` files | Bootstrap detects the dedup symlinks and skips the stack (re)install; or use `RADIANCE_STACK_MODE=skip` |
-| 2 | `could not create 'amdsmi.egg-info': Permission denied` | `amd_smi` builds in place inside root-owned `/opt/rocm/share/amd_smi` | Copy to a writable temp dir and install from there |
+| 2 | `could not create 'amdsmi.egg-info': Permission denied`, or `does not appear to be a Python project` | `amd_smi` builds in place inside root-owned `/opt/rocm/share/amd_smi`; ROCm 10.1 ships some trees without `setup.py`, and the package directory is `amdsmi/` in some layouts | Copy to a writable temp dir and install from there; if only the package directory is present, bootstrap synthesizes minimal build metadata |
 | 3 | `amd-quark==0.12.post1` reappears after the vLLM build | `uv pip install` re-resolves `requirements/rocm.txt`, re-adding it | Uninstall `amd-quark` **after** the fork install |
 | 4 | `ModuleNotFoundError: No module named 'vllm.model_executor.layers.quantization.utils.quant_utils'` under `vllm serve` | Editable install + config copy into `site-packages/vllm` confused the setuptools editable finder | Default install is now a **wheel** (matches the image); uninstalls any prior editable vLLM first |
 | 5 | `/usr/bin/python3: No module named pybind11` during libr4d | `build.sh` used system python, not the venv | Run `build.sh` with the venv on `PATH` |
@@ -376,6 +383,8 @@ them if you see them, or if you're on an older checkout.
 | 10 | `patch_unified_attention_lds` reported `FAIL … missing` or drift | aiter absent, or aiter ≥0.1.21 rewrote the file | Skips cleanly, or applies the new-layout clamp; see section 6 |
 | 11 | `ModuleNotFoundError: No module named 'aiter.ops.triton.unified_attention'` | aiter ≥0.1.21 moved the module under `attention/`; vLLM's backend imported only the old path | vLLM now tries `aiter.ops.triton.attention.unified_attention` first, falls back to the old path |
 | 12 | `ModuleNotFoundError: No module named 'flydsl'` (from `aiter/ops/topk_select.py`) | aiter installed `--no-deps`, so aiter 0.1.23's own dependency `flydsl` was missing | bootstrap now installs aiter's runtime deps (`flydsl`, pandas, psutil, matplotlib, pyyaml, einops, pybind11, ninja) |
+| 13 | `CMake Error … Unable to find python matching: …/.venv/bin/python` (missing `Python_INCLUDE_DIRS`, `Development.Module`, `Development.SABIModule`) | `python3.12-dev` is not installed, so CMake cannot satisfy FindPython | Preflight checks for `Python.h` and names the apt package; `sudo apt install python3.12-dev` and re-run |
+| 14 | `The ROCm root directory: /opt/rocm/core-10.1 does not contain the HIP runtime CMake package` | `hip-lang-config.cmake` is not in the versioned SDK tree — dev package missing, or ROCm keeps the cmake package in the unversioned `/opt/rocm` | Bootstrap points `ROCM_PATH`/`HIP_PATH` at whichever of `core-10.*` / `/opt/rocm` has hip-lang, and fails early if neither does; install `amdrocm-core-dev10.1` or set `RADIANCE_ROCM_HOME` |
 
 ### Why the wheel install, not editable
 

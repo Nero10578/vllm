@@ -44,7 +44,8 @@ out-of-tree patches.
 
 Useful knobs: `RADIANCE_VENV`, `RADIANCE_STACK_MODE=amd-wheel|auto|skip`,
 `RADIANCE_ROCM_ROOT` (defaults to the newest `/opt/rocm/core-10.*`, i.e. `/opt/rocm/core-10.1` on
-current hosts), `RADIANCE_ROCM_WHEEL_TAG` (default `rocm10.1.0`), `RADIANCE_TORCH_BACKEND`,
+current hosts), `RADIANCE_ROCM_HOME` (root with `lib/cmake/hip-lang`, auto-detected),
+`RADIANCE_ROCM_WHEEL_TAG` (default `rocm10.1.0`), `RADIANCE_TORCH_BACKEND`,
 `RADIANCE_INSTALL_MODE=editable|wheel`, `RADIANCE_INSTALL_AITER=1` (+ `RADIANCE_AITER_VERSION`,
 `RADIANCE_AITER_COMMIT`, `RADIANCE_AITER_SPEC`), `RADIANCE_R4D_DIR`,
 `RADIANCE_SKIP_{DEPS,FORK,R4D,HIPEXT,PATCHES,CONFIGS,LLVM_LINK,SMOKE}=1`.
