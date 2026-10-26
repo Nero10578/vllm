@@ -8,15 +8,15 @@
 # stack, libr4d, the MXFP4/W4A8 HIP extension, the runtime modules, the tuned
 # configs, the out-of-tree patches, and the amdsmi startup hook.
 #
-# The default stack mode mirrors the proven ROCm 10 + AMD whl-next flow for
-# gfx1201 (torch 2.13.0+rocm10.0.0), which matches this fork's `torch == 2.13.0`
+# The default stack mode mirrors the proven ROCm 10.1 + AMD whl-next flow for
+# gfx1201 (torch 2.14.0+rocm10.1.0), which matches this fork's `torch == 2.14.0`
 # pin. Modes:
-#   amd-wheel : system ROCm 10 dev headers + AMD whl-next torch/triton (default)
+#   amd-wheel : system ROCm 10.1 dev headers + AMD whl-next torch/triton (default)
 #   auto      : let uv --torch-backend resolve a ROCm stack
 #   skip      : a matched torch/triton stack is already importable
 #
 # Prerequisites on the host:
-#   * ROCm 10 userspace + `amdrocm-core-dev10.0` (hipcc on PATH)
+#   * ROCm 10.1 userspace + `amdrocm-core-dev10.1` (hipcc on PATH)
 #   * uv (https://docs.astral.sh/uv/)
 #   * git, a C++ toolchain, python3.12 available to uv
 #
@@ -35,20 +35,25 @@ GFX_ARCH="${RADIANCE_GFX_ARCH:-gfx1201}"
 
 STACK_MODE="${RADIANCE_STACK_MODE:-amd-wheel}"
 TORCH_BACKEND="${RADIANCE_TORCH_BACKEND:-auto}"
-TORCH_VERSION="${RADIANCE_TORCH_VERSION:-2.13.0}"
-TORCHVISION_VERSION="${RADIANCE_TORCHVISION_VERSION:-0.28.0}"
-TORCHAUDIO_VERSION="${RADIANCE_TORCHAUDIO_VERSION:-2.11.0.2}"
+TORCH_VERSION="${RADIANCE_TORCH_VERSION:-2.14.0}"
+TORCHVISION_VERSION="${RADIANCE_TORCHVISION_VERSION:-0.29.0a0}"
+TORCHAUDIO_VERSION="${RADIANCE_TORCHAUDIO_VERSION:-2.11.0.3}"
 ROCM_WHEEL_INDEX="${RADIANCE_ROCM_WHEEL_INDEX:-https://stable.repo.amd.com/rocm/whl-next/}"
+ROCM_WHEEL_TAG="${RADIANCE_ROCM_WHEEL_TAG:-rocm10.1.0}"
 # editable (default): edits under vllm/** take effect with no rebuild. The config copy
 # below is redirected to the live package (VLLM_PKG) so it never materializes a
 # site-packages/vllm that would shadow the editable package. Set
 # RADIANCE_INSTALL_MODE=wheel to instead build a real site-packages/vllm (image-style).
 INSTALL_MODE="${RADIANCE_INSTALL_MODE:-editable}"   # editable | wheel
 
-# ROCm 10 keeps the SDK under /opt/rocm/core-10.0; fall back to /opt/rocm.
+# ROCm 10 keeps the SDK under /opt/rocm/core-10.<minor> (core-10.1 on current
+# hosts); prefer the newest such tree, else fall back to /opt/rocm.
 ROCM_ROOT="${RADIANCE_ROCM_ROOT:-}"
 if [ -z "$ROCM_ROOT" ]; then
-  if [ -d /opt/rocm/core-10.0 ]; then ROCM_ROOT=/opt/rocm/core-10.0; else ROCM_ROOT=/opt/rocm; fi
+  ROCM_ROOT=/opt/rocm
+  for cand in $(ls -d /opt/rocm/core-10.* 2>/dev/null | sort -V); do
+    [ -d "$cand" ] && ROCM_ROOT="$cand"
+  done
 fi
 
 R4D_REPO="${RADIANCE_R4D_REPO:-https://codeberg.org/StillDeadcode/libr4d.git}"
@@ -97,9 +102,14 @@ echo "site-packages: $SP"
 # A venv that already went through the ROCm LLVM dedup has _rocm_sdk_*/lib symlinked
 # into the (root-owned) system ROCm tree. uv can no longer uninstall/reinstall the
 # SDK packages that own those paths, so never run a stack (re)install on such a venv.
+# Remember the target: after a ROCm upgrade the links point at the old tree and the
+# venv must be recreated instead of silently reusing the old stack.
 DEDUPED=0
+DEDUP_TARGET=""
 if [ -L "$SP/_rocm_sdk_libraries/lib" ] || [ -L "$SP/_rocm_sdk_core/lib" ]; then
   DEDUPED=1
+  DEDUP_TARGET="$(readlink "$SP/_rocm_sdk_core/lib" 2>/dev/null \
+    || readlink "$SP/_rocm_sdk_libraries/lib" 2>/dev/null || true)"
 fi
 
 # -----------------------------------------------------------------------------
@@ -110,7 +120,7 @@ fi
 if ! "$PY" -c 'import amdsmi' >/dev/null 2>&1; then
   log "amdsmi"
   AMD_SMI_SRC=""
-  for cand in "$ROCM_ROOT/share/amd_smi" /opt/rocm/share/amd_smi /opt/rocm/core-10.0/share/amd_smi; do
+  for cand in "$ROCM_ROOT/share/amd_smi" /opt/rocm/share/amd_smi /opt/rocm/core-10.1/share/amd_smi; do
     [ -d "$cand" ] && { AMD_SMI_SRC="$cand"; break; }
   done
   if [ -n "$AMD_SMI_SRC" ]; then
@@ -136,8 +146,11 @@ elif [ "$STACK_MODE" = "auto" ]; then
   uv pip install --python "$PY" --torch-backend="$TORCH_BACKEND" triton torchvision 2>/dev/null \
     || warn "triton/torchvision install returned non-zero"
 else
-  # amd-wheel: the proven gfx1201 / ROCm 10 flow.
+  # amd-wheel: the proven gfx1201 / ROCm 10.1 flow.
   if [ "$DEDUPED" = "1" ]; then
+    if [ -n "$DEDUP_TARGET" ] && [ "$DEDUP_TARGET" != "$ROCM_ROOT/lib" ]; then
+      die "venv is deduped to $DEDUP_TARGET but the ROCm root is $ROCM_ROOT; delete $VENV and rerun"
+    fi
     warn "venv already has the ROCm LLVM dedup symlinks; skipping the torch stack"
     warn "(re)install so uv does not try to remove root-owned /opt/rocm files."
     warn "Use RADIANCE_STACK_MODE=skip to silence this."
@@ -152,11 +165,11 @@ else
     # so triton is never built from source here.
     uv pip install --python "$PY" --reinstall \
         --extra-index-url "$ROCM_WHEEL_INDEX" \
-        "torch[device-${GFX_ARCH}]==${TORCH_VERSION}+rocm10.0.0"
+        "torch[device-${GFX_ARCH}]==${TORCH_VERSION}+${ROCM_WHEEL_TAG}"
     uv pip install --python "$PY" --index-url "$ROCM_WHEEL_INDEX" \
-        "torch[device-${GFX_ARCH}]==${TORCH_VERSION}+rocm10.0.0" \
-        "torchvision[device-${GFX_ARCH}]==${TORCHVISION_VERSION}+rocm10.0.0" \
-        "torchaudio==${TORCHAUDIO_VERSION}+rocm10.0.0" || warn "torchvision/torchaudio install returned non-zero"
+        "torch[device-${GFX_ARCH}]==${TORCH_VERSION}+${ROCM_WHEEL_TAG}" \
+        "torchvision[device-${GFX_ARCH}]==${TORCHVISION_VERSION}+${ROCM_WHEEL_TAG}" \
+        "torchaudio==${TORCHAUDIO_VERSION}+${ROCM_WHEEL_TAG}" || warn "torchvision/torchaudio install returned non-zero"
     # amd-quark currently circular-imports on vLLM main; the radiance Quark paths are
     # default-off and guarded, so removing it is safe for non-Quark checkpoints.
     uv pip uninstall --python "$PY" amd-quark 2>/dev/null || true
@@ -165,8 +178,8 @@ fi
 
 # -----------------------------------------------------------------------------
 if [ "$SKIP_LLVM_LINK" != "1" ] && [ "$STACK_MODE" = "amd-wheel" ]; then
-  log "LLVM library dedup (ROCm 10 SDK vs python _rocm_sdk_* copies)"
-  # ROCm 10 ships the same libraries in /opt/rocm and in the python _rocm_sdk_*
+  log "LLVM library dedup (ROCm 10.1 SDK vs python _rocm_sdk_* copies)"
+  # ROCm 10.1 ships the same libraries in /opt/rocm and in the python _rocm_sdk_*
   # packages; the duplicate LLVM crashes triton's spirv-expand-step. Point the
   # python copies at the system tree. Idempotent: an already-correct link is left
   # untouched. Run this only once per venv and never (re)install the stack after.
@@ -193,7 +206,7 @@ fi
 if [ "${RADIANCE_INSTALL_AITER:-0}" = "1" ]; then
   log "AITER (gfx1201, source build; kernels JIT at runtime)"
   # The qualified image pinned AITER 0.1.20 (fc2e5d57) for torch 2.12 / ROCm 7.14. This
-  # host is torch 2.13 / ROCm 10, so default to the current ROCm/aiter tag and let the
+  # host is torch 2.14 / ROCm 10.1, so default to the current ROCm/aiter tag and let the
   # operator override. Changing the AITER version changes the AITER-backed tuning paths
   # (preshuffle FP8 GEMM, unified attention, GDN knobs), so treat it as a re-qualification.
   AITER_VERSION="${RADIANCE_AITER_VERSION:-0.1.23}"

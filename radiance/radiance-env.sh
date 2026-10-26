@@ -11,9 +11,14 @@
 # See the vllm-radiance DOCKERHUB.md for the full knob reference.
 
 # --- ROCm / device targeting -------------------------------------------------
-# ROCm 10 keeps the SDK under /opt/rocm/core-10.0; older layouts use /opt/rocm.
+# ROCm 10 keeps the SDK under /opt/rocm/core-10.<minor> (core-10.1 on current
+# hosts); prefer the newest such tree, else fall back to /opt/rocm.
 if [ -z "${ROCM_PATH:-}" ]; then
-  if [ -d /opt/rocm/core-10.0 ]; then ROCM_PATH=/opt/rocm/core-10.0; else ROCM_PATH=/opt/rocm; fi
+  ROCM_PATH=/opt/rocm
+  for cand in $(ls -d /opt/rocm/core-10.* 2>/dev/null | sort -V); do
+    [ -d "$cand" ] && ROCM_PATH="$cand"
+  done
+  unset cand
 fi
 export ROCM_PATH
 export HIP_PATH="${HIP_PATH:-$ROCM_PATH}"
@@ -25,10 +30,10 @@ export HIP_ARCHITECTURES="${HIP_ARCHITECTURES:-gfx1201}"
 export AMDGPU_TARGETS="${AMDGPU_TARGETS:-gfx1201}"
 export GPU_ARCHS="${GPU_ARCHS:-gfx1201}"
 
-# --- runtime library/service paths (required: triton under ROCm 10) ----------
-# Both the system tree and the core-10.0 tree must be on the loader path so
-# triton/vLLM find the ROCm 10 kernel and BLAS libraries.
-export LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/core-10.0/lib:${LD_LIBRARY_PATH:-}"
+# --- runtime library/service paths (required: triton under ROCm 10.1) --------
+# Both the system tree and the core-10.1 tree must be on the loader path so
+# triton/vLLM find the ROCm 10.1 kernel and BLAS libraries.
+export LD_LIBRARY_PATH="/opt/rocm/lib:${ROCM_PATH}/lib:${LD_LIBRARY_PATH:-}"
 export TRITON_USE_ROCM="${TRITON_USE_ROCM:-1}"
 # AMD-recommended FP16 GEMM path on the R9700.
 export TORCH_BLAS_PREFER_HIPBLASLT="${TORCH_BLAS_PREFER_HIPBLASLT:-1}"

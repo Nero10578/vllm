@@ -1,7 +1,7 @@
 # Radiance baremetal setup — from zero
 
 This is the end-to-end runbook for building and serving **this fork** (the radiance-gfx1201 vLLM)
-on a bare-metal ROCm 10 host with `uv` as the Python environment. It records the exact steps that
+on a bare-metal ROCm 10.1 host with `uv` as the Python environment. It records the exact steps that
 worked, and every failure we hit along the way with its fix, so you don't rediscover them.
 
 Primary qualified target: AMD Radeon AI PRO R9700 / gfx1201, dual-GPU TP2, FP8 weights + FP8 KV.
@@ -33,9 +33,9 @@ can't live in the vLLM source tree.
 ## 1. Host prerequisites (once)
 
 ```bash
-# ROCm 10 userspace + developer headers (hipcc), plus the build toolchain
+# ROCm 10.1 userspace + developer headers (hipcc), plus the build toolchain
 sudo apt update
-sudo apt install -y amdrocm-core-dev10.0 build-essential python3.12-dev g++ git
+sudo apt install -y amdrocm-core-dev10.1 build-essential python3.12-dev g++ git
 
 which hipcc && hipcc --version          # must be on PATH
 rocm-smi                                # confirm the R9700s are visible
@@ -63,7 +63,7 @@ git log --oneline -1        # note the commit; verify it after any pull
 
 ## 3. Bootstrap
 
-### Default (AMD whl-next ROCm 10 stack + wheel install)
+### Default (AMD whl-next ROCm 10.1 stack + wheel install)
 
 ```bash
 ./radiance/bootstrap.sh
@@ -74,10 +74,10 @@ What it does, in order:
 1. Creates `.venv` (Python 3.12).
 2. Installs **amdsmi** from a writable copy (see issue #2).
 3. Installs the ROCm stack: `requirements/rocm.txt`, then AMD's prebuilt
-   `torch 2.13.0+rocm10.0.0` / `torchvision 0.28.0+rocm10.0.0` / `torchaudio 2.11.0.2+rocm10.0.0`
+   `torch 2.14.0+rocm10.1.0` / `torchvision 0.29.0a0+rocm10.1.0` / `torchaudio 2.11.0.3+rocm10.1.0`
    from `https://stable.repo.amd.com/rocm/whl-next/`, then removes `amd-quark`.
 4. LLVM library dedup: symlinks `_rocm_sdk_core/lib` and `_rocm_sdk_libraries/lib` to
-   `/opt/rocm/core-10.0/lib` (see issue #1).
+   `/opt/rocm/core-10.1/lib` (see issue #1).
 5. Installs **this fork as a wheel** (non-editable) — see issue #4 — then removes `amd-quark` again
    (the install re-adds it).
 6. Builds **libr4d** → `site-packages/r4d.so`.
@@ -92,23 +92,24 @@ Expected tail:
 r4d 0.5.0 kernels 20
 radiance_mxfp4_fp8 OK
 configs installed; amdsmi .pth installed (amdsmi_init before HIP)
-vllm … | torch 2.13.0+rocm10.0.0 | torchvision 0.28.0+rocm10.0.0 | triton 3.8.0+…rocm10.0.0
+vllm … | torch 2.14.0+rocm10.1.0 | torchvision 0.29.0a0+rocm10.1.0 | triton 3.8.0+…rocm10.1.0
 r4d 0.5.0 kernels 20
 radiance runtime modules OK
 ```
 
 ### Stack modes
 
-- `RADIANCE_STACK_MODE=amd-wheel` (default) — the ROCm 10 / AMD whl-next flow above.
+- `RADIANCE_STACK_MODE=amd-wheel` (default) — the ROCm 10.1 / AMD whl-next flow above.
 - `RADIANCE_STACK_MODE=skip` — you already have a working torch stack; verifies it and skips all
   stack (re)installs. **Use this whenever the venv already went through the LLVM dedup** (issue #1).
-- `RADIANCE_STACK_MODE=auto` — `uv --torch-backend` resolves the stack (not recommended on ROCm 10).
+- `RADIANCE_STACK_MODE=auto` — `uv --torch-backend` resolves the stack (not recommended on ROCm 10.1).
 
 ### Useful overrides
 
 ```
 RADIANCE_VENV=/path/.venv
-RADIANCE_ROCM_ROOT=/opt/rocm/core-10.0
+RADIANCE_ROCM_ROOT=/opt/rocm/core-10.1
+RADIANCE_ROCM_WHEEL_TAG=rocm10.1.0       # AMD wheel local-version tag (+rocm10.1.0)
 RADIANCE_INSTALL_MODE=wheel|editable     # default wheel
 RADIANCE_INSTALL_AITER=1                 # opt-in; see section 6
 RADIANCE_AITER_VERSION / RADIANCE_AITER_COMMIT / RADIANCE_AITER_SPEC
@@ -157,7 +158,7 @@ cat > ~/vllm-radiance/start_vllm.sh <<'EOF'
 set -euo pipefail
 cd ~/vllm-radiance
 source .venv/bin/activate
-source radiance/radiance-env.sh          # ROCm10 paths + qualified RADIANCE_* defaults
+source radiance/radiance-env.sh          # ROCm 10.1 paths + qualified RADIANCE_* defaults
 
 # host-specific extras (keep what you've proven)
 export HIP_VISIBLE_DEVICES=0,1
@@ -184,7 +185,7 @@ Notes:
 
 - **`--attention-backend=R4D` is what engages the libr4d path.** Without it you get stock ROCm
   attention and the radiance kernels stay idle.
-- `radiance-env.sh` sets the qualified `RADIANCE_*` defaults and the ROCm 10 loader paths. Source it;
+- `radiance-env.sh` sets the qualified `RADIANCE_*` defaults and the ROCm 10.1 loader paths. Source it;
   don't hand-roll them.
 - The qualified R4D envelope is TP2, FP8 KV, prefix caching + `--mamba-cache-mode=align`, 16K, 85%,
   8 seqs.
@@ -259,7 +260,7 @@ Facts:
 - It JIT-builds `module_aiter_core` on first import (~25 s), visible as `[aiter] start build
   [module_aiter_core]`.
 - The qualified image used AITER **0.1.20**; we default to 0.1.23 because 0.1.20 predates
-  torch 2.13 / ROCm 10.
+  torch 2.14 / ROCm 10.1.
 
 ### The RDNA LDS-fit overlay (re-ported for aiter >= 0.1.21)
 
@@ -307,7 +308,7 @@ aiter config.
    `--attention-backend=ROCM_AITER_UNIFIED_ATTN`. This is the path for geometries R4D can't serve,
    notably **TP8** (`gqa=3`) and the head-512 Gemma drafter. Validated at TP8.
 3. **Pin aiter 0.1.20** (the qualified image version) so the old-layout overlay applies as written —
-   but then you also lose the 0.1.23 support; risk: may not build against torch 2.13 / ROCm 10.
+   but then you also lose the 0.1.23 support; risk: may not build against torch 2.14 / ROCm 10.1.
 
 The aiter change that matters for GEMM applied regardless: `patch_radiance_dispatch`'s `SPLITK`
 alignment fix (visible as `# --- radiance fix (patch_radiance_dispatch.py): scale-alignment guard ---`
@@ -398,6 +399,20 @@ RADIANCE_STACK_MODE=skip ./radiance/bootstrap.sh        # rebuilds vLLM + native
 Since the install is a wheel, `git pull` alone does **not** change the running vLLM — re-run
 bootstrap. If you only changed `radiance/*.py` (no `vllm/**`), you can copy the specific module into
 site-packages instead of a full rebuild.
+
+### Upgrading ROCm
+
+The LLVM dedup symlinks inside `.venv` point at one specific SDK tree, so a ROCm minor upgrade
+(e.g. 10.0 → 10.1) invalidates the installed stack. Delete the venv and re-run bootstrap so the
+wheels are reinstalled for the new tree:
+
+```bash
+rm -rf .venv
+./radiance/bootstrap.sh
+```
+
+`bootstrap.sh` refuses (`venv is deduped to … but the ROCm root is …`) instead of silently reusing a
+venv linked to the old tree.
 
 ---
 

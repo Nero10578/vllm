@@ -22,11 +22,11 @@ time:
 
 ## Quick start
 
-The default stack mode mirrors the proven **ROCm 10 + AMD whl-next** flow for gfx1201
-(`torch 2.13.0+rocm10.0.0`), which matches this fork's `torch == 2.13.0` pin:
+The default stack mode mirrors the proven **ROCm 10.1 + AMD whl-next** flow for gfx1201
+(`torch 2.14.0+rocm10.1.0`), which matches this fork's `torch == 2.14.0` pin:
 
 ```bash
-# Host: ROCm 10 + amdrocm-core-dev10.0, hipcc on PATH, uv on PATH.
+# Host: ROCm 10.1 + amdrocm-core-dev10.1, hipcc on PATH, uv on PATH.
 ./radiance/bootstrap.sh                 # amd-wheel stack (default)
 
 # ...or if you already built the env the manual way:
@@ -43,7 +43,8 @@ the radiance extras: libr4d, the MXFP4/W4A8 HIP extension, tuned configs, the am
 out-of-tree patches.
 
 Useful knobs: `RADIANCE_VENV`, `RADIANCE_STACK_MODE=amd-wheel|auto|skip`,
-`RADIANCE_ROCM_ROOT` (defaults to `/opt/rocm/core-10.0` when present), `RADIANCE_TORCH_BACKEND`,
+`RADIANCE_ROCM_ROOT` (defaults to the newest `/opt/rocm/core-10.*`, i.e. `/opt/rocm/core-10.1` on
+current hosts), `RADIANCE_ROCM_WHEEL_TAG` (default `rocm10.1.0`), `RADIANCE_TORCH_BACKEND`,
 `RADIANCE_INSTALL_MODE=editable|wheel`, `RADIANCE_INSTALL_AITER=1` (+ `RADIANCE_AITER_VERSION`,
 `RADIANCE_AITER_COMMIT`, `RADIANCE_AITER_SPEC`), `RADIANCE_R4D_DIR`,
 `RADIANCE_SKIP_{DEPS,FORK,R4D,HIPEXT,PATCHES,CONFIGS,LLVM_LINK,SMOKE}=1`.
@@ -58,7 +59,7 @@ Useful knobs: `RADIANCE_VENV`, `RADIANCE_STACK_MODE=amd-wheel|auto|skip`,
 > (`RADIANCE_PRESHUFFLE`), the GDN AITER knobs, and the targets of `patch_unified_attention_lds`
 > plus `patch_radiance_dispatch`'s `SPLITK` hunk. No `amd-aiter` wheel is published (the AMD
 > whl-next index and PyPI both lack it), so this is a source build. The qualified image pinned
-> **0.1.20** (`fc2e5d57`) for torch 2.12 / ROCm 7.14; because this host is torch 2.13 / ROCm 10, the
+> **0.1.20** (`fc2e5d57`) for torch 2.12 / ROCm 7.14; because this host is torch 2.14 / ROCm 10.1, the
 > bootstrap defaults to the current tag **0.1.23** (`50da036a`). Override with
 > `RADIANCE_AITER_VERSION` / `RADIANCE_AITER_COMMIT` / `RADIANCE_AITER_SPEC`. Changing the AITER
 > version changes the AITER-backed tuning paths, so treat it as a re-qualification. When AITER is
@@ -147,8 +148,8 @@ and re-anchor against the installed versions.
 ## Compatibility note
 
 The published image qualified a compiler-stack unit of ROCm 7.14 / AMD torch 2.12 / AMD Triton 3.7.1
-/ AITER 0.1.20 against vLLM v0.28.0. This fork's base instead pins `torch == 2.13.0`, and the host's
-proven **ROCm 10 + AMD whl-next** flow (`torch 2.13.0+rocm10.0.0`, precompiled Triton) supplies
+/ AITER 0.1.20 against vLLM v0.28.0. This fork's base instead pins `torch == 2.14.0`, and the host's
+proven **ROCm 10.1 + AMD whl-next** flow (`torch 2.14.0+rocm10.1.0`, precompiled Triton) supplies
 exactly that — so build against that stack, not the image's 7.14/2.12 pins. `amd-wheel` mode encodes
 it; `RADIANCE_STACK_MODE=skip` is for hosts that already have a matched stack.
 
