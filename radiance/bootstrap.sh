@@ -125,6 +125,10 @@ log "uv venv ($VENV)"
 uv venv --python "${RADIANCE_PYTHON:-3.12}" "$VENV" 2>/dev/null || true
 PY="$VENV/bin/python"
 [ -x "$PY" ] || die "venv python missing at $PY"
+# The script invokes "$PY" directly instead of activating the venv, so tools installed
+# into it (notably ninja, which aiter's runtime JIT shells out to) are not on PATH for
+# the build/smoke subprocesses unless the caller activated the venv. Put it on PATH here.
+export PATH="$VENV/bin:$PATH"
 SP="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
 echo "site-packages: $SP"
 
@@ -346,6 +350,21 @@ else
   uv pip uninstall --python "$PY" amd-quark 2>/dev/null || true
 fi
 SP="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+
+# -----------------------------------------------------------------------------
+# tvm-ffi 0.1.11 (the tilelang-0.1.10-era pin) forces a C++17 JIT of its optional
+# torch C-DLPack addon on ROCm even when torch already exports the C exchange API.
+# torch >= 2.13 headers need C++20, so that build fails on every import and
+# EnvTensorAllocator stays off. 0.1.12+ uses torch's native API on ROCm; 0.1.14+
+# also builds the addon with C++20 if a JIT is still needed.
+if [ "${RADIANCE_SKIP_TVM_FFI:-0}" != "1" ]; then
+  TVM_FFI_VERSION="${RADIANCE_TVM_FFI_VERSION:-0.1.14.post0}"
+  log "tvm-ffi (torch C-DLPack addon compatibility)"
+  uv pip install --python "$PY" "apache-tvm-ffi==${TVM_FFI_VERSION}" \
+    || warn "apache-tvm-ffi ${TVM_FFI_VERSION} install failed; torch C-DLPack JIT may warn at startup"
+  "$PY" -c 'import importlib.metadata as m; print("tvm-ffi", m.version("apache-tvm-ffi"))' \
+    || warn "tvm-ffi version check failed"
+fi
 
 # Where the *live* vllm package lives: the source tree for an editable install, the
 # site-packages copy for a wheel. The config copy targets this so an editable install

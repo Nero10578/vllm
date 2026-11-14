@@ -23,8 +23,10 @@ timm>=1.0.17
 # To be consistent with test_quark.py
 amd-quark==0.12.post1
 tilelang==0.1.10
-# Required apache-tvm-ffi matching tilelang version
-apache-tvm-ffi==0.1.11
+# 0.1.12+ stops forcing the torch C-DLPack JIT on ROCm and uses torch's native
+# __dlpack_c_exchange_api__; 0.1.14+ also builds the addon with C++20, which the
+# torch >= 2.13 headers require. 0.1.11 hardcodes C++17 and fails that JIT on 2.14.
+apache-tvm-ffi==0.1.14.post0
 # Required for faster safetensors model loading
 fastsafetensors >= 0.3.3
 # Mooncake transfer engine for KV cache offloading/transfer (ROCm build, published on PyPI)
