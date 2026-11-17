@@ -1516,7 +1516,11 @@ class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
                 f"unsupported decision_config.json pooling {decision['pooling']!r}"
             )
         attention_mode = decision.get("attention_mode", "causal")
-        if attention_mode not in ("causal", "noncausal_full_attention"):
+        if attention_mode not in (
+            "causal",
+            "noncausal_full_attention",
+            "prefix_bidir",
+        ):
             raise ValueError(
                 f"unsupported decision_config.json attention_mode {attention_mode!r}"
             )
@@ -1527,9 +1531,10 @@ class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
                 "decision_config.json must list one token id per answer code"
             )
 
-        # The full attention layers read the whole prompt in both directions;
-        # the Gated DeltaNet layers stay causal.
-        is_causal = attention_mode == "causal"
+        # The full attention layers follow the declared mode; the Gated
+        # DeltaNet layers stay causal. `prefix_bidir` adds its state/question
+        # block ranges through the PrefixLM mask, so its base is causal.
+        is_causal = attention_mode != "noncausal_full_attention"
         for config in {
             id(config): config for config in (hf_config, model_config.hf_text_config)
         }.values():

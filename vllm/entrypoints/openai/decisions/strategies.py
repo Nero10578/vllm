@@ -1215,6 +1215,11 @@ class D3Strategy(ReadStrategy):
     #: The runtime reads videos at 2 frames per second, 4 to 32 frames each.
     VIDEO_FPS = 2
     VIDEO_MAX_FRAMES = 32
+    #: The state segment of the `prefix_bidir` attention layout. The question
+    #: block starts after the state text; see `d3_format.state_end_char`.
+    STATE_MARK = "State:\n"
+    QUESTION_MARK = "\n\nQuestion:\n"
+    HEADER_TITLE = "Questions in this request:"
 
     def __init__(self, context: ReadContext):
         super().__init__(context)
@@ -1222,15 +1227,134 @@ class D3Strategy(ReadStrategy):
         decision = model_config.hf_config.decision_config
         if decision.get("prompt", "d3") != "d3":
             raise ValueError(f"unknown decision prompt {decision['prompt']!r}")
+        self.decision = decision
         self.codes: list[str] = decision["codes"]
         self.temperature = float(decision.get("temperature", 1.0))
+        self.attention_mode = decision.get("attention_mode", "causal")
+        self.prompt_layout = decision.get("prompt_layout")
+        self.temperature_by_questions = self._temperature_table(
+            decision.get("temperature_by_questions")
+        )
         self.max_model_len = model_config.max_model_len
         self.tokenizer = context.online_renderer.renderer.get_tokenizer()
 
     def limits(self) -> DecisionLimits:
         return DecisionLimits(
-            max_questions=64, max_options=len(self.codes), labeled=False
+            max_questions=int(
+                self.decision.get(
+                    "max_questions",
+                    255 if self.prompt_layout == "header-v1" else 64,
+                )
+            ),
+            max_options=len(self.codes),
+            labeled=False,
         )
+
+    @staticmethod
+    def _temperature_table(
+        value: Any,
+    ) -> tuple[tuple[int, ...], tuple[float, ...]] | None:
+        """Validate `temperature_by_questions` and return (bounds, temperatures)."""
+        if value is None:
+            return None
+        if not isinstance(value, Mapping) or set(value) != {
+            "max_questions",
+            "temperature",
+        }:
+            raise ValueError(
+                "temperature_by_questions must hold max_questions and "
+                "temperature only"
+            )
+        bounds = value["max_questions"]
+        temps = value["temperature"]
+        if (
+            not isinstance(bounds, list)
+            or not isinstance(temps, list)
+            or len(temps) != len(bounds) + 1
+            or any(
+                isinstance(b, bool) or not isinstance(b, int) or b < 1
+                for b in bounds
+            )
+            or any(
+                not isinstance(t, (int, float))
+                or isinstance(t, bool)
+                or not math.isfinite(t)
+                or t <= 0
+                for t in temps
+            )
+            or any(b1 >= b2 for b1, b2 in zip(bounds, bounds[1:]))
+        ):
+            raise ValueError(
+                "temperature_by_questions needs strictly increasing positive "
+                "max_questions and one more finite, positive temperature"
+            )
+        return tuple(bounds), tuple(float(t) for t in temps)
+
+    def _temperature(self, questions: Sequence[Question]) -> float:
+        if self.temperature_by_questions is None:
+            return self.temperature
+        bounds, temps = self.temperature_by_questions
+        count = sum(
+            q.type.name in ("choice", "noul", "score") for q in questions
+        )
+        return next((t for b, t in zip(bounds, temps) if count <= b), temps[-1])
+
+    def _header(self, questions: Sequence[Question]) -> list[str]:
+        lines = [self.HEADER_TITLE]
+        for number, q in enumerate(questions, 1):
+            lines.append(
+                f"{number}. {q.instructions or self.DEFAULT_INSTRUCTIONS}"
+            )
+            if q.type.name in ("choice", "score"):
+                texts, _ = self._options(q)
+                lines += [f"   - {text}" for text in texts]
+        lines.append("")
+        return lines
+
+    def _state_end_char(self, text: str, state: str) -> int:
+        body = state if state else self.EMPTY_STATE
+        start = text.find(self.STATE_MARK + body + self.QUESTION_MARK)
+        if start < 0:
+            raise StructuredDecisionError(
+                "rendered prompt has no state segment followed by the "
+                "question block"
+            )
+        return start + len(self.STATE_MARK) + len(body)
+
+    def _state_token_count(
+        self, offsets: Sequence[Sequence[int]], end_char: int
+    ) -> int:
+        n = 0
+        for _, stop in offsets:
+            if stop > end_char:
+                break
+            n += 1
+        if n < 1:
+            raise StructuredDecisionError("empty state segment")
+        return n
+
+    def _prefix_bidir_ranges(
+        self,
+        text: str,
+        ids: list[int],
+        state: str,
+        prefix_len: int = 0,
+    ) -> list[tuple[int, int]] | None:
+        if self.attention_mode != "prefix_bidir":
+            return None
+        encoded = self.tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=True,  # type: ignore[call-arg]
+        )
+        n = prefix_len + self._state_token_count(
+            encoded["offset_mapping"], self._state_end_char(text, state)
+        )
+        if not 0 < n < len(ids):
+            raise StructuredDecisionError(
+                f"a {len(ids)}-token prompt cannot have a {n}-token state block"
+            )
+        return [(0, n - 1), (n, len(ids) - 1)]
 
     def render_state(self, state: Any) -> str:
         if state is None or state == "":
@@ -1270,9 +1394,15 @@ class D3Strategy(ReadStrategy):
             f"question {q.id!r}: this model does not answer {q.type.name!r} questions"
         )
 
-    def _prompt(self, state: str, q: Question, media: Sequence[str]) -> str:
+    def _prompt(
+        self,
+        state: str,
+        q: Question,
+        media: Sequence[str],
+        header: Sequence[str] | None = None,
+    ) -> str:
         texts, _ = self._options(q)
-        lines = [
+        lines = (header or []) + [
             "State:",
             state,
             "",
@@ -1374,10 +1504,19 @@ class D3Strategy(ReadStrategy):
             for modality in ("image", "video")
             for _ in (media or {}).get(modality, ())
         ]
-        prompts = [self._prompt(state, q, placeholders) for q in questions]
+        temperature = self._temperature(questions)
+        header = (
+            self._header(questions)
+            if self.prompt_layout == "header-v1" and not placeholders
+            else None
+        )
+        prompts = [
+            self._prompt(state, q, placeholders, header) for q in questions
+        ]
 
         engine_inputs: list[EngineInput] = []
         prompt_ids: list[list[int]] = []
+        ranges_list: list[list[tuple[int, int]] | None] = []
         if placeholders:
             # The media come first, so every prompt starts with the same
             # prefix, which ends at the last media placeholder.
@@ -1388,14 +1527,25 @@ class D3Strategy(ReadStrategy):
                     "the questions' prompts do not share their media"
                 )
             media_input = await self._render_media(prefix, media or {}, cache_salt)
+            media_ids = media_input["prompt_token_ids"]
             for p in prompts:
-                ids = media_input["prompt_token_ids"] + self._tokens(p[split:])
+                suffix = p[split:]
+                ids = media_ids + self._tokens(suffix)
                 engine_inputs.append({**media_input, "prompt_token_ids": ids})
                 prompt_ids.append(ids)
+                ranges_list.append(
+                    self._prefix_bidir_ranges(
+                        suffix, ids, state, prefix_len=len(media_ids)
+                    )
+                )
         else:
             prompt_ids = [self._tokens(p) for p in prompts]
             engine_inputs = [
                 tokens_input(ids, cache_salt=cache_salt) for ids in prompt_ids
+            ]
+            ranges_list = [
+                self._prefix_bidir_ranges(p, ids, state)
+                for p, ids in zip(prompts, prompt_ids)
             ]
         for q, ids in zip(questions, prompt_ids):
             if len(ids) > self.max_model_len:
@@ -1404,11 +1554,19 @@ class D3Strategy(ReadStrategy):
                     f"than max_model_len={self.max_model_len}; nothing is truncated"
                 )
 
-        async def read_one(n: int, engine_input: EngineInput) -> list[float]:
+        async def read_one(
+            n: int,
+            engine_input: EngineInput,
+            ranges: list[tuple[int, int]] | None,
+        ) -> list[float]:
             result = None
             async for result in self.context.engine_client.encode(  # noqa: B007
                 engine_input,
-                PoolingParams(task="classify", use_activation=False),
+                PoolingParams(
+                    task="classify",
+                    use_activation=False,
+                    prefix_bidir_ranges=ranges,
+                ),
                 f"{request_id}-{n}",
                 lora_request=lora_request,
                 trace_headers=trace_headers,
@@ -1424,13 +1582,16 @@ class D3Strategy(ReadStrategy):
             return result.outputs.data.tolist()
 
         logits = await asyncio.gather(
-            *(read_one(n, inputs) for n, inputs in enumerate(engine_inputs))
+            *(
+                read_one(n, inputs, ranges_list[n])
+                for n, inputs in enumerate(engine_inputs)
+            )
         )
 
         reads = []
         for q, ids, code_logits in zip(questions, prompt_ids, logits):
             texts, order = self._options(q)
-            scaled = [v / self.temperature for v in code_logits[: len(texts)]]
+            scaled = [v / temperature for v in code_logits[: len(texts)]]
             probs = label_softmax(scaled)
             reads.append(
                 QuestionRead(

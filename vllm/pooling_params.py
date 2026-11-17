@@ -117,6 +117,9 @@ class PoolingParams(
     late_interaction_params: LateInteractionParams | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
+    #: Decision 3.0 `prefix_bidir` state/question block ranges, as absolute
+    #: prompt positions. Set by the D3 read strategy; unset for other models.
+    prefix_bidir_ranges: list[tuple[int, int]] | None = None
 
     ## for token embedding models
     # --8<-- [start:token-embed-pooling-params]
@@ -300,6 +303,7 @@ class PoolingParams(
             f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
             f"late_interaction_params={self.late_interaction_params}, "
             f"late_chunking_params={self.late_chunking_params}, "
+            f"prefix_bidir_ranges={self.prefix_bidir_ranges}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 

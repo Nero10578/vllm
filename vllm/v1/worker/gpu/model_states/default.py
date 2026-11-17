@@ -70,27 +70,38 @@ class DefaultModelState(ModelState):
             and uses_multimodal_pruning(self.model_config, model)
         )
 
-        # Per-request bidirectional MM ranges. Not kept in the encoder cache:
-        # only the first PP rank has one, but every rank builds attn metadata.
+        # Per-request bidirectional ranges: multimodal spans, or the state
+        # block of a Decision 3.0 `prefix_bidir` request. Not kept in the
+        # encoder cache: only the first PP rank has one, but every rank builds
+        # attn metadata.
         self.mm_prefix_ranges: dict[str, list[tuple[int, int]]] | None = None
-        if (
-            self.model_config.supports_multimodal_inputs
-            and self.model_config.is_mm_prefix_lm
-        ):
+        if self.model_config.is_mm_prefix_lm:
             self.mm_prefix_ranges = {}
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.mm_prefix_ranges is not None:
-            hf_text_config = self.model_config.hf_text_config
-            self.mm_prefix_ranges[new_req_data.req_id] = compute_mm_prefix_ranges(
-                [new_req_data.mm_features],
-                sliding_window=self.model_config.get_sliding_window(),
-                clamp_sliding_window=getattr(
-                    self.model, "mm_prefix_clamp_sliding_window", False
-                )
-                or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
-                span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
-            )[0]
+            custom = (
+                new_req_data.pooling_params.prefix_bidir_ranges
+                if new_req_data.pooling_params is not None
+                else None
+            )
+            if custom is not None:
+                self.mm_prefix_ranges[new_req_data.req_id] = custom
+            else:
+                hf_text_config = self.model_config.hf_text_config
+                self.mm_prefix_ranges[new_req_data.req_id] = compute_mm_prefix_ranges(
+                    [new_req_data.mm_features],
+                    sliding_window=self.model_config.get_sliding_window(),
+                    clamp_sliding_window=getattr(
+                        self.model, "mm_prefix_clamp_sliding_window", False
+                    )
+                    or getattr(
+                        hf_text_config, "mm_prefix_clamp_sliding_window", False
+                    ),
+                    span_pad=getattr(
+                        self.model, "mm_prefix_span_leading_pad_modulus", 0
+                    ),
+                )[0]
         if self.rope_state is not None:
             # `prompt_embeds` is a passthrough modality with no grid info, but
             # M-RoPE assumes per-feature grids. Filter it out.

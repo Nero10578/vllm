@@ -347,11 +347,20 @@ class ModelArchConfigConvertorBase:
     def is_mm_prefix_lm(self, supports_multimodal: bool = True) -> bool:
         """Whether to use bidirectional attention for mm positions.
 
-        `supports_multimodal` is False when the deployment is configuration-
-        disabled for multimodal inputs (text-only serving). In that case
-        mm_prefix is unnecessary and must stay off so attention backends
-        without `supports_mm_prefix()` remain eligible.
+        Decision 3.0 `prefix_bidir` checkpoints also use the PrefixLM mask for
+        their state/question blocks, including when multimodal inputs are
+        disabled. `supports_multimodal` is False when the deployment is
+        configuration-disabled for multimodal inputs (text-only serving). In
+        that case mm_prefix is unnecessary for multimodal spans and must stay
+        off so attention backends without `supports_mm_prefix()` remain
+        eligible.
         """
+        decision = getattr(self.hf_config, "decision_config", None)
+        if (
+            isinstance(decision, dict)
+            and decision.get("attention_mode") == "prefix_bidir"
+        ):
+            return True
         if not supports_multimodal:
             return False
         if hasattr(self.hf_config, "is_mm_prefix_lm"):
