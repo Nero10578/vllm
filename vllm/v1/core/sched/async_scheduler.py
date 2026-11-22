@@ -49,6 +49,7 @@ class AsyncScheduler(Scheduler):
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
             request.spec_token_ids = spec_token_placeholders
+            self._radiance_cap_spec_width(request)
 
             # Set the next step index in which this request is eligible to be
             # scheduled for decode (for PP microbatching).

@@ -376,7 +376,8 @@ class KernelConfig:
     - "aiter_triton_mxfp8_mxfp8": Use the AITER Triton MXFP8 W8A8
       (moe_gemm_a8w8) MoE kernel (ROCm gfx942)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
-    - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
+    - "rdna3": Use the fused RDNA W4A16 HIP kernel
+      (ROCm gfx1100/gfx1200/gfx1201)
     - "rdna3_int4_int8": Int4 MoE decode with int8 activations per 32 values
       on RDNA3/RDNA3.5 (ROCm gfx11) for up to 64 tokens, Triton WNA16
       otherwise; auto-selected for `quantization_config.moe.activation`

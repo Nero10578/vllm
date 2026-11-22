@@ -1407,7 +1407,16 @@ class SamplingParams(
             try:
                 validate_xgrammar_grammar(self)
                 self.structured_outputs._backend = "xgrammar"
-            except VLLMValidationError:
+            except VLLMValidationError as xgrammar_error:
+                # radiance: Guidance accepts legacy structural tags only.
+                if self.structured_outputs.structural_tag:
+                    tag = json_mod.loads(self.structured_outputs.structural_tag)
+                    if "structures" not in tag:
+                        raise VLLMValidationError(
+                            "XGrammar rejected this modern structural tag; "
+                            "Guidance fallback does not support its format. "
+                            "Check tool schema constraints and compiler compatibility."
+                        ) from xgrammar_error
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.

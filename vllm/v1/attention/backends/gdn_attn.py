@@ -76,6 +76,21 @@ class GDNFlashInferCheckpointPlan:
     rows: torch.Tensor
 
 
+_RADIANCE_GDN_META = __import__("os").environ.get("RADIANCE_GDN_META", "1") == "1"
+
+
+def _radiance_gdn_indices(builder, size, device):
+    cached = getattr(builder, "_radiance_gdn_arange", None)
+    if cached is None or cached.device != device or cached.numel() < size:
+        cached = torch.arange(size, dtype=torch.int32, device=device)
+        builder._radiance_gdn_arange = cached
+    empty = getattr(builder, "_radiance_gdn_empty", None)
+    if empty is None or empty.device != device:
+        empty = torch.empty(0, dtype=torch.int32, device=device)
+        builder._radiance_gdn_empty = empty
+    return cached[:size], empty
+
+
 class GDNAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -365,8 +380,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_sequence_masks = None
             num_spec_decodes = 0
         else:
-            spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
-            num_spec_decodes = spec_sequence_masks_cpu.sum().item()
+            if _RADIANCE_GDN_META:
+                mask = num_decode_draft_tokens_cpu.numpy() >= 0
+                spec_sequence_masks_cpu = torch.from_numpy(mask)
+                num_spec_decodes = int(mask.sum())
+            else:
+                spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
+                num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             # A batch whose rows all drafted nothing still has to run the
             # speculative path: that is the only path that applies each row's
             # accepted-token offset to the recurrent state.
@@ -459,14 +479,17 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     num_spec_decodes * (self.num_spec + 1),
                     query_start_loc_cpu[-1].item(),
                 )
-                spec_token_indx = torch.arange(
-                    spec_token_size,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
-                non_spec_token_indx = torch.empty(
-                    0, dtype=torch.int32, device=query_start_loc.device
-                )
+                if _RADIANCE_GDN_META:
+                    spec_token_indx, non_spec_token_indx = _radiance_gdn_indices(
+                        self, spec_token_size, query_start_loc.device
+                    )
+                else:
+                    spec_token_indx = torch.arange(
+                        spec_token_size, dtype=torch.int32, device=query_start_loc.device
+                    )
+                    non_spec_token_indx = torch.empty(
+                        0, dtype=torch.int32, device=query_start_loc.device
+                    )
                 # Padded sequences trail the spec decodes, so slice them off
                 # rather than gather with the host mask (an H2D copy + a kernel).
                 spec_state_indices_tensor = block_table_tensor[
@@ -560,7 +583,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
 
-            if self.gdn_prefill_backend == "aiter_flydsl":
+            if self.gdn_prefill_backend in ("aiter_flydsl", "aiter"):
                 # AITER carries its own reusable varlen metadata and has no use
                 # for FLA's chunk indices, so it replaces them rather than
                 # extending what _build_chunk_metadata returns.
@@ -606,7 +629,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             if spec_sequence_masks_cpu is not None:
                 request_rows = (~spec_sequence_masks_cpu).nonzero().flatten().tolist()
             checkpoint = self.checkpoint_builder.build(m, request_rows)
-            if checkpoint is not None and self.gdn_prefill_backend == "aiter_flydsl":
+            if checkpoint is not None and self.gdn_prefill_backend in ("aiter_flydsl", "aiter"):
                 # FlyDSL cannot store checkpoints, so this step runs the
                 # Triton/FLA prefill, which needs FLA's chunk metadata.
                 chunk_indices, chunk_offsets = self._build_chunk_metadata(

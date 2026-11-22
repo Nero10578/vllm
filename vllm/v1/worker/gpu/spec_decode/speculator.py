@@ -653,6 +653,9 @@ class DraftModelSpeculator(BaseSpeculator):
             )
         else:
             sampled = greedy_argmax(logits)
+        policy = getattr(self, "_radiance_policy", None)
+        if policy is not None:
+            policy.observe(logits, sampled)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
 

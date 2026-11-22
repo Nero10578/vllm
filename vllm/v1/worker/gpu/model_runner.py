@@ -426,6 +426,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
                 )
+                # RADIANCE: merge each GDN layer's two input projections into one GEMM.
+                import radiance_gdnmerge as _radiance_gdnmerge
+                _radiance_gdnmerge.merge_model(self.model)
             log_layer_backends(self.model, self.vllm_config.model_config)
             if self.lora_config:
                 self.model = self.load_lora_model(
@@ -1763,7 +1766,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = logits[:, : self.vocab_size]
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
-            logits = self.model_state.compute_sample_logits(sample_hidden_states)
+            # --- RADIANCE int2 verify head (patch_verify_head.py) ---
+            import radiance_verifyhead as _radiance_vh
+            _radiance_vh.before_compute_logits(self, input_batch, grammar_output)
+            try:
+                logits = self.model_state.compute_sample_logits(sample_hidden_states)
+            finally:
+                _radiance_vh.after_compute_logits()
 
         if self.masked_token_ids is not None:
             logits.index_fill_(-1, self.masked_token_ids, float("-inf"))
@@ -2292,6 +2301,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
+        draft_widths = None
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
         self.execute_model_state = None
 
@@ -2432,7 +2442,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = get_drafter_hidden_states(
                 self.model, draft_hidden_states
             )
-            with self.draft_context():
+            from radiance_draft import v2_policy_scope
+            with (
+                self.draft_context(),
+                v2_policy_scope(self, input_batch, num_spec_tokens) as policy,
+            ):
                 draft_tokens = self.speculator.propose(
                     input_batch,
                     attn_metadata,
@@ -2449,6 +2463,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     dp_sync_state=dp_sync_state,
                     mm_inputs=mm_inputs,
                 )
+            if policy is not None and policy.step:
+                draft_widths = policy.finish(draft_tokens)
+                self._radiance_mtp_forwards = policy.step
+                self._radiance_mtp_widths = draft_widths
             if self.pcp_manager is not None:
                 self.pcp_manager.sync_drafts(
                     draft_tokens, input_batch.idx_mapping, self.speculator.draft_logits
@@ -2466,7 +2484,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # not have a speculator (i.e. self.speculator is None)
             draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
             self.draft_tokens_handler.set_draft_tokens(
-                input_batch, draft_tokens[:, :num_spec_tokens]
+                input_batch, draft_tokens[:, :num_spec_tokens], draft_widths
             )
             # Drafts aren't used when none were proposed this step (e.g. skip_drafts).
             if self.pp_handler is not None and num_spec_tokens > 0:

@@ -203,7 +203,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             max_query_len=(
                 int(max_query_len) if input_batch.decode_graph_eligible else None
             ),
-            need_eager=is_profile,
+            need_eager=is_profile or getattr(self, "_radiance_policy", None) is not None,
             dp_sync_state=dp_sync_state,
             parallel_config=self.vllm_config.parallel_config,
         )

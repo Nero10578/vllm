@@ -72,14 +72,16 @@ class DraftTokensHandler:
         )
 
     def set_draft_tokens(
-        self, input_batch: InputBatch, draft_tokens: torch.Tensor
+        self, input_batch: InputBatch, draft_tokens: torch.Tensor, draft_widths=None
     ) -> None:
         if not input_batch.has_structured_output_reqs:
             # No draft token validation needs to be performed by
             # the scheduler for this batch. Record draft token widths only.
             num_draft_tokens = draft_tokens.shape[1]
-            for req_id in input_batch.req_ids:
-                self._draft_tokens_by_req[req_id] = num_draft_tokens
+            for i, req_id in enumerate(input_batch.req_ids):
+                self._draft_tokens_by_req[req_id] = (
+                    num_draft_tokens if draft_widths is None else draft_widths[i]
+                )
             return
 
         # For spec decoding + structured outputs, we must transfer the
@@ -97,8 +99,10 @@ class DraftTokensHandler:
             copy_event.record()
 
         copy = _PendingCopy(copy_event)
-        for req_id, row in zip(input_batch.req_ids, draft_tokens_np):
-            self._draft_tokens_by_req[req_id] = (row, copy)
+        for i, (req_id, row) in enumerate(zip(input_batch.req_ids, draft_tokens_np)):
+            self._draft_tokens_by_req[req_id] = (
+                (row, copy) if draft_widths is None else (row[:draft_widths[i]], copy)
+            )
 
     def discard(self, req_id: str) -> None:
         self._draft_tokens_by_req.pop(req_id, None)

@@ -254,7 +254,6 @@ class AutoGPTQConfig(QuantizationConfig):
                 prefix, self.modules_in_block_to_quantize
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
-
             if not check_moe_marlin_supports_layer(
                 layer, self.group_size, allow_tile_padding=True
             ):

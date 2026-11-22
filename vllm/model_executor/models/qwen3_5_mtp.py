@@ -4,6 +4,8 @@
 
 from collections.abc import Iterable
 
+import os
+
 import torch
 from torch import nn
 from transformers import Qwen3_5MoeTextConfig, Qwen3_5TextConfig
@@ -52,6 +54,15 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _radiance_quark_bf16_mtp(quant_config) -> bool:
+    """Whether this checkpoint's MTP submodule must bypass Quark packing."""
+    return bool(
+        quant_config
+        and quant_config.get_name() == "quark"
+        and os.environ.get("RADIANCE_QUARK_BF16_MTP", "0") == "1"
+    )
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -91,9 +102,19 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
         # Ref: https://github.com/vllm-project/vllm/pull/38650
         # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
+        radiance_quark_bf16_mtp = _radiance_quark_bf16_mtp(quant_config)
+        if radiance_quark_bf16_mtp:
+            logger.warning_once(
+                "[radiance] loading Qwen MTP tensors as BF16 outside the global "
+                "Quark recipe (RADIANCE_QUARK_BF16_MTP=1)"
+            )
         fc_quant = (
             None
-            if (quant_config and quant_config.get_name() == "modelopt_fp4")
+            if (
+                quant_config
+                and quant_config.get_name() == "modelopt_fp4"
+                or radiance_quark_bf16_mtp
+            )
             else quant_config
         )
         self.fc = ColumnParallelLinear(
@@ -106,9 +127,16 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             prefix=f"{prefix}.fc",
         )
 
+        # --- radiance (patch_quark_bf16_mtp.py): checkpoint BF16 MTP layers ---
+        _radiance_layer_config = vllm_config
+        if radiance_quark_bf16_mtp:
+            import copy as _radiance_copy
+
+            _radiance_layer_config = _radiance_copy.copy(vllm_config)
+            _radiance_layer_config.quant_config = None
         self.layers = torch.nn.ModuleList(
             Qwen3_5DecoderLayer(
-                vllm_config,
+                _radiance_layer_config,
                 layer_type="full_attention",
                 prefix=f"{prefix}.layers.{idx}",
             )
@@ -206,7 +234,11 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
-        self.quant_config = vllm_config.quant_config
+        self.quant_config = (
+            None
+            if _radiance_quark_bf16_mtp(vllm_config.quant_config)
+            else vllm_config.quant_config
+        )
 
         super().__init__()
         self.config = config

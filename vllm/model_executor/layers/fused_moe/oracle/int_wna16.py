@@ -166,6 +166,8 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         # _supports_current_device(). RDNA3_INT4_INT8 is only tried for a
         # kInt8Dynamic32Sym activation request (see _filter_by_activation).
         WNA16MoEBackend.RDNA3_INT4_INT8,
+        # Native HIP kernel, gated on gfx1100/gfx12x by _supports_current_device().
+        WNA16MoEBackend.RDNA3,
         WNA16MoEBackend.RDNA3,
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,

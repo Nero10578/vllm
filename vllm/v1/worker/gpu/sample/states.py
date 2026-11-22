@@ -131,8 +131,11 @@ class SamplingStates:
         )
         if top_k is None and top_p is None:
             return logits
+        # radiance: use the existing CPU mirror; no device synchronization.
+        kmax = 0 if top_k is None else int(self.top_k.np[idx_mapping_np].max())
         return apply_top_k_top_p(
-            logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+            logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows,
+            max_top_k=0 if kmax >= logits.shape[-1] else kmax,
         )
 
     def masks_logits(self, req_idx: int) -> bool:

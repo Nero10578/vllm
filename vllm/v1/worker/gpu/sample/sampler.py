@@ -341,8 +341,12 @@ class Sampler:
             else:  # Use XPU sampler
                 sampled, _ = xpu_sample(processed_logits, top_k, top_p)
         else:
+            _rad_kmax = (0 if top_k is None else int(
+                self.sampling_states.top_k.np[idx_mapping_np].max()
+            ))
             processed_logits = apply_top_k_top_p(
-                processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+                processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows,
+                max_top_k=0 if _rad_kmax >= processed_logits.shape[-1] else _rad_kmax,
             )
             sampled = gumbel_sample(
                 processed_logits,

@@ -79,6 +79,14 @@ void rdna_prefill_attn(int64_t config, torch::Tensor& q,
                        const std::optional<torch::Tensor>& query_start_loc,
                        int64_t head_group);
 
+void moe_gptq_gemm_rdna4_wmma(torch::Tensor a, torch::Tensor c,
+                              torch::Tensor b_q_weight, torch::Tensor b_scales,
+                              torch::Tensor b_qzeros, torch::Tensor topk_weights,
+                              torch::Tensor sorted_token_ids,
+                              torch::Tensor expert_ids,
+                              torch::Tensor num_tokens_post_padded,
+                              int64_t top_k, int64_t block_size_m,
+                              bool mul_topk_weight, int64_t output_topk);
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,

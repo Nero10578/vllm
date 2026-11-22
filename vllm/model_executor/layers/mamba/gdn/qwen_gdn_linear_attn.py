@@ -99,6 +99,11 @@ from vllm.v1.attention.backends.gdn_attn import (
     FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
     GDNAttentionMetadata,
 )
+
+try:
+    import radiance_gdn as _radiance_gdn
+except Exception:
+    _radiance_gdn = None
 from vllm.v1.worker.workspace import current_workspace_manager
 
 # Optional ROCm AITER Triton kernels for the GDN decode path.
@@ -197,7 +202,7 @@ def _hip_gdn_unsupported_reasons(
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
 ) -> tuple[
-    str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "hip"]
+    str, Literal["triton", "flashinfer", "cutedsl", "aiter_flydsl", "sycl", "aiter", "hip"]
 ]:
     """Resolve GDN prefill backend.
 
@@ -237,6 +242,11 @@ def _resolve_gdn_prefill_backend(
         else "auto"
     )
     backend = str(backend_cfg).strip().lower()
+    # radiance: explicit HIP/WMMA alternative; never select CDNA FlyDSL on RDNA4.
+    if backend == "aiter":
+        if not current_platform.is_rocm() or not rocm_aiter_ops.is_rdna_gdn_triton_kernels_available():
+            raise RuntimeError("The explicit Radiance AITER HIP backend requires supported RDNA4 kernels")
+        return backend, "aiter"
 
     if backend == "sycl" and not current_platform.is_xpu():
         raise ValueError("GDN prefill backend 'sycl' is only supported on XPU.")
@@ -382,6 +392,7 @@ def _log_gdn_backend_decision(
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
         "aiter_flydsl": "AITER FlyDSL",
+        "aiter": "Radiance AITER HIP/WMMA",
         "hip": "HIP",
         "triton": "Triton/FLA",
         "sycl": "SYCL",
@@ -485,6 +496,8 @@ class ChunkGatedDeltaRule(CustomOp):
             self._forward_method = self.forward_cuda
         elif active_backend == "cutedsl":
             self._forward_method = self.forward_cutedsl
+        elif active_backend == "aiter":
+            self._forward_method = self.forward_aiter
         elif active_backend == "aiter_flydsl":
             self._forward_method = self.forward_aiter_flydsl
         elif active_backend == "hip":
@@ -602,6 +615,46 @@ class ChunkGatedDeltaRule(CustomOp):
         if not output_final_state:
             final_state = None
         return o, final_state
+
+    def forward_aiter(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_offsets: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+        core_attn_out: torch.Tensor | None = None,
+        aiter_prefill_metadata: object | None = None,
+    ):
+        from aiter.ops.triton.gated_delta_net import (
+            chunk_gated_delta_rule_opt_vk,
+        )
+
+        # AITER's VK layout matches vLLM's persistent GDN state layout.  Its
+        # output buffer contract also matches the FLA path used by this layer.
+        return chunk_gated_delta_rule_opt_vk(
+            q=q,
+            k=k,
+            v=v,
+            o=core_attn_out,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            cu_seqlens=cu_seqlens,
+            use_chunk_hip=True,
+            state_dtype=initial_state.dtype,
+            snapshot_dtype=k.dtype,
+            use_exp2=True,
+            prefill_metadata=aiter_prefill_metadata,
+        )
 
     def forward_aiter_flydsl(
         self,
@@ -1671,7 +1724,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
 
             chunk_indices, chunk_offsets = prepare_metadata_cutedsl(cu_seqlens, T)
-        elif self.gdn_prefill_backend == "aiter_flydsl":
+        elif self.gdn_prefill_backend in ("aiter_flydsl", "aiter"):
             aiter_prefill_metadata = rocm_aiter_ops.build_gdn_flydsl_prefill_metadata(
                 [T],
                 cu_seqlens=cu_seqlens,
@@ -1899,6 +1952,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata is None:
             self._warmup_prefill_kernels(mixed_qkv, 0)
             return
+
+        # --- RADIANCE all-R4D gated delta net (patch_r4d.py) ---
+        # conv_prep -> kkt_solve -> chunk_scan for a prefill step, conv_update ->
+        # recurrent_update for a speculative decode step. Returns False for any step it
+        # does not cover, which leaves the Triton body below exactly as it was.
+        if _radiance_gdn is not None and _radiance_gdn.ALL:
+            if _radiance_gdn.forward_core_fused(self, mixed_qkv, b, a, core_attn_out):
+                return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 

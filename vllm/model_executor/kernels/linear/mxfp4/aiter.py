@@ -46,7 +46,23 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not current_platform.supports_mx():
+        # --- radiance (patch_quark_mxfp4.py): gfx1201 native MXFP4, RADIANCE_MXFP4=1 ---
+        # supports_mx() is a CDNA4 allowlist, but Triton 3.6 lowers tl.dot_scaled on gfx12x
+        # (upconvert + bf16 WMMA), verified bit-identical against the emulated path.
+        _radiance_mx = current_platform.supports_mx()
+        if not _radiance_mx:
+            import os as _radiance_os
+            if _radiance_os.environ.get("RADIANCE_MXFP4", "0") == "1":
+                from vllm.platforms.rocm import on_gfx12x
+
+                _radiance_mx = bool(on_gfx12x())
+                if _radiance_mx:
+                    logger.warning_once(
+                        "[radiance] native MXFP4 enabled on gfx12x "
+                        "(aiter gemm_afp4wfp4 via tl.dot_scaled); the emulation notice "
+                        "elsewhere in the log does not apply to mxfp4 x mxfp4 layers"
+                    )
+        if not _radiance_mx:
             return False, "current platform does not support native MXFP4 computation"
 
         from vllm._aiter_ops import is_aiter_found_and_supported

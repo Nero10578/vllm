@@ -189,7 +189,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             uniform_token_count=1,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
-            need_eager=is_profile,
+            need_eager=is_profile or getattr(self, "_radiance_policy", None) is not None,
             dp_sync_state=decode_batch_sync,
             parallel_config=self.vllm_config.parallel_config,
         )
@@ -211,7 +211,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.on_multi_step_decode_begin(num_reqs)
         multi_step_decode_fn = (
             self._run_fused_multi_step_decode
-            if self.supports_decode_metadata_update
+            if self.supports_decode_metadata_update and getattr(self, "_radiance_policy", None) is None
             else self._multi_step_decode
         )
         multi_step_decode_fn(
@@ -239,7 +239,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         attn_metadata = None
         slot_mappings_by_layer = None
+        policy = getattr(self, "_radiance_policy", None)
         for step in range(1, num_speculative_steps):
+            if policy is not None and policy.stop:
+                break
             if not skip_attn and (self.advance_draft_positions or step == 1):
                 slot_mappings = self.block_tables.compute_slot_mappings(
                     idx_mapping,

@@ -488,6 +488,14 @@ def rocm_unquantized_gemm_impl(
         return linear_batch_invariant(x, weight, bias)
 
     from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950, on_rdna4
+    # --- RADIANCE skinny GEMM kernel (patch_skinny_gemm.py) ---
+    import radiance_gemm as _radiance_gemm
+    if (_radiance_gemm.ENABLED and bias is None
+            and weight.dim() == 2 and x.dtype == torch.bfloat16
+            and weight.dtype == torch.bfloat16):
+        _out = _radiance_gemm.maybe_gemm(x, weight)
+        if _out is not None:
+            return _out
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]

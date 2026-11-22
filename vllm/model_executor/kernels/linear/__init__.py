@@ -1195,6 +1195,28 @@ def init_mxfp4_linear_kernel(
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
 
+    # --- radiance (patch_quark_mxfp4.py): the gfx1201 W4A8 fp8-WMMA kernel ---
+    # Imported here, not at module scope: this runs in the worker at model load, whereas the
+    # module is imported in the parent during config parsing, where initialising HIP would
+    # force the engine core to spawn instead of fork. It declines via is_supported() unless
+    # RADIANCE_MXFP4_W4A8=1 on gfx12x, so the list is unchanged everywhere else.
+    try:
+        import os as _radiance_os
+        import radiance_mxfp4 as _radiance_mxfp4
+
+        _radiance_cls = _radiance_mxfp4.kernel_class()
+        if _radiance_cls is not None:
+            if _radiance_os.environ.get('RADIANCE_MXFP4_W4A8') == '1':
+                possible = [_radiance_cls]  # explicitly required, never emulation
+            else:
+                possible.insert(0, _radiance_cls)
+        elif _radiance_os.environ.get('RADIANCE_MXFP4_W4A8') == '1':
+            raise RuntimeError('Required Radiance W4A8 extension is unavailable')
+    except Exception as _radiance_exc:
+        if _radiance_os.environ.get('RADIANCE_MXFP4_W4A8') == '1':
+            raise
+        logger.warning_once("[radiance] MXFP4 W4A8 kernel unavailable: %r", _radiance_exc)
+
     if envs.VLLM_BATCH_INVARIANT and platform is PlatformEnum.CUDA:
         possible = [k for k in possible if k.supports_batch_invariance()]
 

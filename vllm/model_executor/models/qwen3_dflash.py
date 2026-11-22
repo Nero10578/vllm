@@ -120,7 +120,9 @@ def dflash_has_any_sliding(config: Qwen3Config) -> bool:
 def _reads_raw_weights(projs: list[nn.Module]) -> bool:
     """Whether post-load `.weight` is plain (not quantized, not CPU-repacked)."""
     return not current_platform.is_cpu() and all(
-        isinstance(p.quant_method, UnquantizedLinearMethod) for p in projs
+        isinstance(p.quant_method, UnquantizedLinearMethod)
+        and p.weight.ndim == 2
+        for p in projs
     )
 
 
@@ -418,6 +420,24 @@ class DFlashQwen3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+_DFLASH_DENSE = (torch.bfloat16, torch.float16, torch.float32)
+
+
+def _dflash_kv_weight_rows(qkv_proj, q_size: int) -> torch.Tensor:
+    """The K/V rows of a qkv projection as a dense compute-dtype matrix."""
+    weight = qkv_proj.weight
+    if weight.dtype in _DFLASH_DENSE and weight.ndim == 2:
+        return weight[q_size:]
+    dtype = getattr(qkv_proj, "orig_dtype", torch.bfloat16)
+    eye = torch.eye(
+        qkv_proj.input_size_per_partition, dtype=dtype, device=weight.device
+    )
+    out = qkv_proj.quant_method.apply(qkv_proj, eye, bias=None)
+    if isinstance(out, tuple):
+        out = out[0]
+    return out[:, q_size:].t().contiguous()
+
+
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
     decoder_layer_cls = DFlashQwen3DecoderLayer
@@ -571,6 +591,15 @@ class DFlashQwen3Model(nn.Module):
             if has_bias:
                 kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
                 kv_bias = torch.cat(kv_biases, dim=0)
+        elif self._context_kv_proj is None and not current_platform.is_cpu():
+            # The loader has finished packing the projections. Keep native
+            # fused quantized context projections on their upstream path.
+            kv_weight = torch.cat(
+                [_dflash_kv_weight_rows(a.qkv_proj, a.q_size) for a in layers_attn],
+                dim=0,
+            )
+            if has_bias:
+                kv_bias = torch.cat([a.qkv_proj.bias[a.q_size:] for a in layers_attn])
         refill_derived(self, "_fused_kv_weight", kv_weight)
         refill_derived(self, "_fused_kv_bias", kv_bias)
 

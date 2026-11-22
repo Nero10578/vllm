@@ -197,7 +197,11 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         logger.info_once(
             "Using aiter unified attention for RocmAiterUnifiedAttentionImpl"
         )
-        from aiter.ops.triton.unified_attention import unified_attention
+        try:
+            # aiter >= 0.1.21 moved unified_attention under the attention/ package.
+            from aiter.ops.triton.attention.unified_attention import unified_attention
+        except ImportError:
+            from aiter.ops.triton.unified_attention import unified_attention
 
         from vllm.platforms.rocm import on_gfx11
 

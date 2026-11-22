@@ -195,17 +195,25 @@ def xpu_sample(
     return sampled, logits_to_return
 
 
+_RADIANCE_TOPK_COMPOSITE = __import__("os").environ.get("RADIANCE_TOPK_COMPOSITE", "1") == "1"
+
+
 def apply_top_k_top_p(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
     has_topp_only_rows: bool = True,
+    *, max_top_k: int = 0,
 ) -> torch.Tensor:
     """Apply top-k and/or top-p masking to logits.
 
     has_topp_only_rows must be True if any row has p < 1 and
     k >= logits.shape[-1] (no active top-k).
     """
+    if _RADIANCE_TOPK_COMPOSITE and k is not None and max_top_k > 0:
+        import radiance_topk
+        if max_top_k <= radiance_topk.KCAP:
+            return radiance_topk.apply_top_k_top_p_composite(logits, k, p)
     if p is None and k is None:
         return logits
 

@@ -65,17 +65,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.def(
       "mxfp4_w4a8_gemv_rdna3(Tensor a, Tensor b_q, Tensor b_scale) -> Tensor");
   rocm_ops.impl("mxfp4_w4a8_gemv_rdna3", torch::kCUDA, &mxfp4_w4a8_gemv_rdna3);
+#endif
 
-  // W4A16 GPTQ kernels for AMD RDNA3 (gfx1100).
+#ifdef VLLM_ROCM_RDNA_W4A16
+  // Scalar W4A16 GPTQ kernels for AMD RDNA3 (gfx1100) and RDNA4
+  // (gfx1200/gfx1201).
   rocm_ops.def(
       "gptq_gemm_rdna3(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
       "Tensor b_scales, bool use_v2_format) -> Tensor");
   rocm_ops.impl("gptq_gemm_rdna3", torch::kCUDA, &gptq_gemm_rdna3);
-
-  rocm_ops.def(
-      "gptq_gemm_rdna3_wmma(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
-      "Tensor b_scales, bool use_v2_format) -> Tensor");
-  rocm_ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
 
   rocm_ops.def(
       "moe_gptq_gemm_rdna3(Tensor a, Tensor! c, Tensor b_q_weight, "
@@ -85,6 +83,27 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int top_k, int block_size_m, bool mul_topk_weight, "
       "int output_topk) -> ()");
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
+#endif
+
+#ifdef VLLM_ROCM_GFX1100
+  // WMMA prefill path for the dense W4A16 GPTQ kernel; gfx11 only.
+  rocm_ops.def(
+      "gptq_gemm_rdna3_wmma(Tensor a, Tensor b_q_weight, Tensor b_qzeros, "
+      "Tensor b_scales, bool use_v2_format) -> Tensor");
+  rocm_ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
+#endif
+
+#ifdef VLLM_ROCM_RDNA4_WMMA
+  // gfx12 WMMA prefill path for the fused MoE W4A16 kernel.
+  rocm_ops.def(
+      "moe_gptq_gemm_rdna4_wmma(Tensor a, Tensor! c, Tensor b_q_weight, "
+      "Tensor b_scales, Tensor b_qzeros, Tensor topk_weights, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor num_tokens_post_padded, "
+      "int top_k, int block_size_m, bool mul_topk_weight, "
+      "int output_topk) -> ()");
+  rocm_ops.impl("moe_gptq_gemm_rdna4_wmma", torch::kCUDA,
+                &moe_gptq_gemm_rdna4_wmma);
 #endif
 
 #ifdef VLLM_ROCM_GFX11
