@@ -413,9 +413,18 @@ def _has_module(module_name: str) -> bool:
         if importlib.util.find_spec(module_name) is None:
             return False
         importlib.import_module(module_name)
-    except Exception:
-        logger.warning(
+    except Exception as exc:
+        # Optional dependency: native imports can legitimately fail on a platform
+        # (e.g. a CUDA-linked torchcodec wheel on ROCm). Keep the traceback at
+        # debug level and log one line, so capability probes do not dump a stack
+        # trace into the startup log on every worker.
+        logger.debug(
             "Module %s was found but failed to import", module_name, exc_info=True
+        )
+        logger.info(
+            "Optional module %s is unavailable (%s); continuing without it",
+            module_name,
+            type(exc).__name__,
         )
         return False
     return True
