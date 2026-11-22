@@ -746,68 +746,53 @@ class Worker(WorkerBase):
 
             # The configured value is a KV budget for *after* every other GPU
             # allocation, but the profile run has just brought up the weights, the
-            # JIT state and the activation peak, and the CUDA graph pool is still
-            # to come. `init_snapshot` predates the weights, so it cannot answer
-            # "will this fit": measure the memory that is free now and clamp
-            # instead of letting allocate_kv_cache OOM.
+            # JIT state and the activation peak. `init_snapshot` predates the
+            # weights, so it cannot answer "will this fit": measure the memory that
+            # is free now.
             #
-            # The graph-pool estimate is measured on a nearly empty GPU and can
-            # grow much larger than the pool the real capture needs once the KV
-            # cache occupies memory, so it is only the default: an operator who
-            # knows their graph budget can override it and spend that memory on KV.
-            graph_headroom_override = os.environ.get(
-                "RADIANCE_KV_GRAPH_HEADROOM_BYTES"
+            # No graph-pool estimate is subtracted here. That estimate is measured
+            # on a nearly empty GPU and can be several times the pool the real
+            # capture needs once the KV cache occupies memory; treating it as a
+            # reservation starves the KV cache. The operator can reserve an
+            # explicit amount with RADIANCE_KV_GRAPH_HEADROOM_BYTES, or disable the
+            # clamp entirely with RADIANCE_KV_CLAMP=0 to get the exact upstream
+            # (request-verbatim) behavior back.
+            clamp_enabled = os.environ.get("RADIANCE_KV_CLAMP", "1") != "0"
+            graph_headroom = max(
+                int(os.environ.get("RADIANCE_KV_GRAPH_HEADROOM_BYTES", "0")), 0
             )
-            if graph_headroom_override is not None:
-                cudagraph_memory_estimate = max(int(graph_headroom_override), 0)
-                graph_headroom_source = "RADIANCE_KV_GRAPH_HEADROOM_BYTES"
-            else:
-                cudagraph_memory_estimate = 0
-                may_capture_graphs = (
-                    current_platform.is_cuda_alike() or current_platform.is_xpu()
-                )
-                if (
-                    may_capture_graphs
-                    and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
-                ):
-                    cudagraph_memory_estimate = (
-                        self.model_runner.profile_cudagraph_memory()
-                    )
-                graph_headroom_source = "CUDA graph pool estimate"
             torch.accelerator.empty_cache()
             post_profile_snapshot = MemorySnapshot(device=self.device)
             redundancy_buffer_memory = 150 * (1 << 20)
             safe_kv_cache_bytes = (
                 post_profile_snapshot.free_memory
-                - cudagraph_memory_estimate
+                - graph_headroom
                 - redundancy_buffer_memory
             )
             logger.info(
                 "kv_cache_memory_bytes: %s GiB free after model load, %s GiB "
-                "held back for %s (+150 MiB); KV budget %s GiB "
-                "(configured %s GiB).",
+                "held back (RADIANCE_KV_GRAPH_HEADROOM_BYTES) + 150 MiB; KV "
+                "budget before multimodal reservation %s GiB (configured %s GiB, "
+                "clamp %s).",
                 format_gib(post_profile_snapshot.free_memory),
-                format_gib(cudagraph_memory_estimate),
-                graph_headroom_source,
+                format_gib(graph_headroom),
                 format_gib(max(safe_kv_cache_bytes, 0)),
                 format_gib(kv_cache_memory_bytes),
+                "enabled" if clamp_enabled else "disabled",
             )
-            if kv_cache_memory_bytes > safe_kv_cache_bytes:
+            if clamp_enabled and kv_cache_memory_bytes > safe_kv_cache_bytes:
                 logger.warning(
                     "kv_cache_memory_bytes requested %s GiB, but only %s GiB is "
-                    "free after model load; holding back %s GiB for %s and "
-                    "allocator headroom and clamping the KV cache to %s GiB. "
-                    "Prefer --gpu-memory-utilization to let vLLM size this "
-                    "automatically, or reduce CUDA graph memory "
-                    "(--cudagraph-capture-sizes / --max-cudagraph-capture-size / "
-                    "--compilation-config '{\"cudagraph_mode\": \"PIECEWISE\"}') "
-                    "to free memory for KV.",
+                    "free after model load; holding back %s GiB + 150 MiB and "
+                    "clamping the KV cache to %s GiB. Set "
+                    "RADIANCE_KV_CLAMP=0 to request the configured size verbatim, "
+                    "RADIANCE_KV_GRAPH_HEADROOM_BYTES to reserve a graph budget, "
+                    "or reduce CUDA graph memory (--cudagraph-capture-sizes / "
+                    "--max-cudagraph-capture-size / "
+                    "--compilation-config '{\"cudagraph_mode\": \"PIECEWISE\"}').",
                     format_gib(kv_cache_memory_bytes),
                     format_gib(post_profile_snapshot.free_memory),
-                    format_gib(
-                        cudagraph_memory_estimate + redundancy_buffer_memory
-                    ),
-                    graph_headroom_source,
+                    format_gib(graph_headroom),
                     format_gib(max(safe_kv_cache_bytes, 0)),
                 )
                 kv_cache_memory_bytes = max(safe_kv_cache_bytes, 0)
