@@ -748,15 +748,32 @@ class Worker(WorkerBase):
             # allocation, but the profile run has just brought up the weights, the
             # JIT state and the activation peak, and the CUDA graph pool is still
             # to come. `init_snapshot` predates the weights, so it cannot answer
-            # "will this fit": measure the memory that is free now, hold back the
-            # graph pool plus a small allocator buffer, and clamp instead of
-            # letting allocate_kv_cache OOM.
-            cudagraph_memory_estimate = 0
-            may_capture_graphs = (
-                current_platform.is_cuda_alike() or current_platform.is_xpu()
+            # "will this fit": measure the memory that is free now and clamp
+            # instead of letting allocate_kv_cache OOM.
+            #
+            # The graph-pool estimate is measured on a nearly empty GPU and can
+            # grow much larger than the pool the real capture needs once the KV
+            # cache occupies memory, so it is only the default: an operator who
+            # knows their graph budget can override it and spend that memory on KV.
+            graph_headroom_override = os.environ.get(
+                "RADIANCE_KV_GRAPH_HEADROOM_BYTES"
             )
-            if may_capture_graphs and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
-                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            if graph_headroom_override is not None:
+                cudagraph_memory_estimate = max(int(graph_headroom_override), 0)
+                graph_headroom_source = "RADIANCE_KV_GRAPH_HEADROOM_BYTES"
+            else:
+                cudagraph_memory_estimate = 0
+                may_capture_graphs = (
+                    current_platform.is_cuda_alike() or current_platform.is_xpu()
+                )
+                if (
+                    may_capture_graphs
+                    and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+                ):
+                    cudagraph_memory_estimate = (
+                        self.model_runner.profile_cudagraph_memory()
+                    )
+                graph_headroom_source = "CUDA graph pool estimate"
             torch.accelerator.empty_cache()
             post_profile_snapshot = MemorySnapshot(device=self.device)
             redundancy_buffer_memory = 150 * (1 << 20)
@@ -765,18 +782,32 @@ class Worker(WorkerBase):
                 - cudagraph_memory_estimate
                 - redundancy_buffer_memory
             )
+            logger.info(
+                "kv_cache_memory_bytes: %s GiB free after model load, %s GiB "
+                "held back for %s (+150 MiB); KV budget %s GiB "
+                "(configured %s GiB).",
+                format_gib(post_profile_snapshot.free_memory),
+                format_gib(cudagraph_memory_estimate),
+                graph_headroom_source,
+                format_gib(max(safe_kv_cache_bytes, 0)),
+                format_gib(kv_cache_memory_bytes),
+            )
             if kv_cache_memory_bytes > safe_kv_cache_bytes:
                 logger.warning(
                     "kv_cache_memory_bytes requested %s GiB, but only %s GiB is "
-                    "free after model load; holding back %s GiB for the CUDA "
-                    "graph pool and allocator headroom and clamping the KV cache "
-                    "to %s GiB. Prefer --gpu-memory-utilization to let vLLM size "
-                    "this automatically.",
+                    "free after model load; holding back %s GiB for %s and "
+                    "allocator headroom and clamping the KV cache to %s GiB. "
+                    "Prefer --gpu-memory-utilization to let vLLM size this "
+                    "automatically, or reduce CUDA graph memory "
+                    "(--cudagraph-capture-sizes / --max-cudagraph-capture-size / "
+                    "--compilation-config '{\"cudagraph_mode\": \"PIECEWISE\"}') "
+                    "to free memory for KV.",
                     format_gib(kv_cache_memory_bytes),
                     format_gib(post_profile_snapshot.free_memory),
                     format_gib(
                         cudagraph_memory_estimate + redundancy_buffer_memory
                     ),
+                    graph_headroom_source,
                     format_gib(max(safe_kv_cache_bytes, 0)),
                 )
                 kv_cache_memory_bytes = max(safe_kv_cache_bytes, 0)
