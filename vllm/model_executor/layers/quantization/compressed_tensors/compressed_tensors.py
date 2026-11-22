@@ -793,15 +793,14 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Detect If Mixed Precision
         if self._is_nvfp4_format(weight_quant):
-            if input_quant is None:
-                return CompressedTensorsW4A4Fp4(use_a16=True)
-
-            if not self._is_nvfp4_format(input_quant):
-                raise ValueError(
-                    "For NVFP4 weights, input quantization must also be NVFP4 "
-                    "format, None for NVFP4A16"
-                )
-            return CompressedTensorsW4A4Fp4()
+            if input_quant is not None and not self._is_nvfp4_format(input_quant):
+                raise ValueError("NVFP4 weights require NVFP4 inputs or None")
+            # Radiance: NVFP4-only load-time compatibility, original exclusions first.
+            from radiance_nvfp4 import select_scheme
+            scheme = select_scheme(weight_quant, input_quant, layer_name)
+            if scheme is not None:
+                return scheme
+            return CompressedTensorsW4A4Fp4(use_a16=input_quant is None)
 
         if self._is_mxfp4_w4a8_fp8(weight_quant, input_quant):
             return CompressedTensorsW4A8Mxfp4(
@@ -1271,11 +1270,3 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         # Sync host (cpu) scale copies read by AITER fused kernels.
         layer._k_scale_cpu.fill_(layer._k_scale_float)
         layer._v_scale_cpu.fill_(layer._v_scale_float)
-
-        # Discard all placeholders.
-        del layer.k_scale
-        del layer.v_scale
-        del layer.q_scale
-        del layer.k_zero_point
-        del layer.v_zero_point
-        del layer.q_zero_point

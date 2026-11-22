@@ -103,13 +103,22 @@ class SamplingStates:
         apply_min_p(logits, expanded_idx_mapping, self.min_p.gpu)
 
     def get_top_k_top_p(
-        self, expanded_idx_mapping: torch.Tensor, idx_mapping_np: np.ndarray
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        do_top_k = np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
-        do_top_p = np.any(self.top_p.np[idx_mapping_np] != 1.0)
+        self,
+        expanded_idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        vocab_size: int,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, bool]:
+        """Returns (top_k, top_p, has_topp_only_rows)."""
+        top_k_np = self.top_k.np[idx_mapping_np]
+        top_p_np = self.top_p.np[idx_mapping_np]
+        do_top_k = np.any(top_k_np != self.vocab_size)
+        do_top_p = np.any(top_p_np != 1.0)
         top_k = self.top_k.gpu[expanded_idx_mapping] if do_top_k else None
         top_p = self.top_p.gpu[expanded_idx_mapping] if do_top_p else None
-        return top_k, top_p
+        has_topp_only_rows = bool(
+            do_top_p and np.any((top_k_np >= vocab_size) & (top_p_np < 1.0))
+        )
+        return top_k, top_p, has_topp_only_rows
 
     def apply_top_k_top_p(
         self,
@@ -117,14 +126,25 @@ class SamplingStates:
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
     ) -> torch.Tensor:
-        top_k, top_p = self.get_top_k_top_p(expanded_idx_mapping, idx_mapping_np)
+        top_k, top_p, has_topp_only_rows = self.get_top_k_top_p(
+            expanded_idx_mapping, idx_mapping_np, logits.shape[-1]
+        )
         if top_k is None and top_p is None:
             return logits
-        # radiance (patch_topk_composite.py): CPU-known bound, no sync.
+        # radiance: use the existing CPU mirror; no device synchronization.
         kmax = 0 if top_k is None else int(self.top_k.np[idx_mapping_np].max())
         return apply_top_k_top_p(
-            logits, top_k, top_p,
-            max_top_k=0 if kmax >= self.vocab_size else kmax,
+            logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows,
+            max_top_k=0 if kmax >= logits.shape[-1] else kmax,
+        )
+
+    def masks_logits(self, req_idx: int) -> bool:
+        """Whether min-p, top-k or top-p can set some of this request's logits
+        to -inf."""
+        return self.temperature.np[req_idx] != 0.0 and (
+            self.min_p.np[req_idx] != 0.0
+            or self.top_k.np[req_idx] != self.vocab_size
+            or self.top_p.np[req_idx] != 1.0
         )
 
     def any_greedy(self, idx_mapping_np: np.ndarray) -> bool:

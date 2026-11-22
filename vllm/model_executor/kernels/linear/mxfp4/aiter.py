@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
@@ -10,6 +9,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
@@ -49,28 +49,19 @@ if is_aiter_found_and_supported():
         out_dtype: torch.dtype | None = torch.bfloat16,
         x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # --- radiance (patch_quark_mxfp4.py): aiter moved this module ---
-        try:
-            from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import (
-                gemm_afp4wfp4,
-                gemm_afp4wfp4_preshuffle,
-            )
-        except ImportError:
-            from aiter.ops.triton.gemm_afp4wfp4 import (
-                gemm_afp4wfp4,
-                gemm_afp4wfp4_preshuffle,
-            )
+        # --- radiance (patch_quark_mxfp4.py): aiter 0.1.17 moved this module ---
+        from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import (
+            gemm_afp4wfp4,
+            gemm_afp4wfp4_preshuffled_weight_scales as gemm_afp4wfp4_preshuffle,
+        )
 
         # aiter allowlists gfx950/gfx1250 for fp4; gfx1201 lowers tl.dot_scaled correctly
         # (verified bit-identical against the emulated path), so relax the assert. Done
         # here, lazily, to keep aiter out of the plugin-load import graph.
-        try:
-            import aiter.ops.triton.utils._triton.arch_info as _radiance_arch
+        import aiter.ops.triton.utils._triton.arch_info as _radiance_arch
 
-            if not _radiance_arch.is_fp4_avail():
-                _radiance_arch.is_fp4_avail = lambda: True
-        except ImportError:
-            pass
+        if not _radiance_arch.is_fp4_avail():
+            _radiance_arch.is_fp4_avail = lambda: True
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
         if rocm_use_aiter_fp4_asm_gemm:
@@ -177,7 +168,8 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
 
     def __init__(self, config: MxFp4LinearLayerConfig) -> None:
         super().__init__(config)
-        self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
+        self.asm_gemm_supported = rocm_aiter_ops.is_asm_fp4_gemm_supported()
+        self.use_asm_gemm = False
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -233,6 +225,13 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Use preshuffled ASM (P) and Triton (D) GEMM when tuned in aiter
+        if self.asm_gemm_supported:
+            n, k_bytes = layer.weight.shape
+            self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_tuned(
+                n, k_bytes
+            ) and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(n, k_bytes)
+
         if self.use_asm_gemm and not _asm_fp4_scale_swizzle_supported(
             layer.weight_scale.data
         ):
@@ -254,15 +253,14 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
             weight_scale = weight_scale.view(sm // 32, 2, 16, sn // 8, 2, 4, 1)
             weight_scale = weight_scale.permute(0, 3, 5, 2, 4, 1, 6).contiguous()
             weight_scale = weight_scale.view(sm, sn)
-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            replace_parameter(layer, "weight_scale", weight_scale)
 
-            layer.weight = Parameter(
-                shuffle_weight(layer.weight.data, layout=(16, 16)),
-                requires_grad=False,
+            replace_parameter(
+                layer, "weight", shuffle_weight(layer.weight.data, layout=(16, 16))
             )
         else:
-            layer.weight_scale = Parameter(
-                layer.weight_scale.data.T.contiguous(), requires_grad=False
+            replace_parameter(
+                layer, "weight_scale", layer.weight_scale.data.T.contiguous()
             )
 
     def apply_weights(

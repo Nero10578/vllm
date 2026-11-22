@@ -11,17 +11,13 @@ The dispatch table itself (radiance_kernels.py) is placed into site-packages sep
 Dockerfile COPYs it there). After this, routing changes are edits to radiance_kernels.py, no
 vLLM re-patch.
 """
-import os
 import sysconfig
 from pathlib import Path
 from _patchlib import apply
 
 SP = Path(sysconfig.get_paths()["purelib"])
 CFG = SP / "aiter/ops/triton/utils/gemm_config_utils.py"
-# The vllm hunk must target the live package: the source tree under an editable install,
-# site-packages under a wheel. Already present in the fork source, so this no-ops there.
-_VROOT = Path(os.environ.get("RADIANCE_VLLM_ROOT") or SP)
-KERN = _VROOT / "vllm/model_executor/kernels/linear/scaled_mm/triton.py"
+KERN = SP / "vllm/model_executor/kernels/linear/scaled_mm/triton.py"
 
 CFG_ANCHOR = (
     "    add_default_gemm_config_params(config)\n"
@@ -66,27 +62,8 @@ KERN_NEW = (
 
 
 def main():
-    # The AITER hunk targets an installed package, not the vLLM tree: when this
-    # runs against the fork source (radiance/patches applied in-tree) aiter is
-    # absent and the hunk is deferred to the uv bootstrap. The vLLM hunk is
-    # always in-tree.
-    try:
-        apply(CFG, CFG_ANCHOR, CFG_NEW, "radiance fix (patch_radiance_dispatch.py)", "compute_splitk_params scale-alignment fix")
-    except SystemExit as exc:
-        if "missing" in str(exc):
-            print(f"  DEFER {CFG.name} (out-of-tree aiter; applied by the uv bootstrap)")
-        else:
-            raise
-    # Editable installs resolve the vLLM package to the repo source, not
-    # site-packages/vllm, so the file is absent here even though the hunk is baked
-    # into the fork. Treat a missing path as already-provided by the source tree.
-    try:
-        apply(KERN, KERN_ANCHOR, KERN_NEW, "gfx1201 custom kernel dispatcher", "apply_block_scaled_mm -> dispatcher hook")
-    except SystemExit as exc:
-        if "missing" in str(exc):
-            print(f"  NOOP {KERN.name} (editable install; hunk is baked into the fork source)")
-        else:
-            raise
+    apply(CFG, CFG_ANCHOR, CFG_NEW, "radiance fix (patch_radiance_dispatch.py)", "compute_splitk_params scale-alignment fix")
+    apply(KERN, KERN_ANCHOR, KERN_NEW, "gfx1201 custom kernel dispatcher", "apply_block_scaled_mm -> dispatcher hook")
 
 
 if __name__ == "__main__":

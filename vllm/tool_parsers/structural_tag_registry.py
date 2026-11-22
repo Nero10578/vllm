@@ -102,23 +102,43 @@ def _normalize_qwen_open_nested_objects(
     schema: object,
     *,
     is_root: bool,
+    preserve_evaluation: bool = False,
 ) -> None:
-    """Make open nested objects use XGrammar's JSON-braced representation.
-
-    Omitted and explicit-true ``additionalProperties`` are equivalent under
-    JSON Schema.  The explicit form prevents XGrammar 0.2.3's Qwen-XML path
-    from rendering an open nested object as recursively nested parameter tags,
-    which vLLM's flat Qwen argument converter cannot round-trip.
-    """
+    """Normalize schema positions without changing literal or evaluation constraints."""
     if isinstance(schema, list):
         for item in schema:
-            _normalize_qwen_open_nested_objects(item, is_root=False)
+            _normalize_qwen_open_nested_objects(
+                item, is_root=False, preserve_evaluation=preserve_evaluation,
+            )
         return
     if not isinstance(schema, dict):
         return
 
+    if is_root:
+        # A reference can evaluate properties at the caller, even if its target
+        # sits in a different branch. Preserve the whole schema when both
+        # references and evaluated-property constraints occur.
+        pending = [schema]
+        has_reference = has_closure = False
+        while pending:
+            value = pending.pop()
+            if isinstance(value, dict):
+                has_reference |= any(key in value for key in ("$ref", "$dynamicRef", "$recursiveRef"))
+                has_closure |= "unevaluatedProperties" in value
+                pending.extend(value.values())
+            elif isinstance(value, list):
+                pending.extend(value)
+            if has_reference and has_closure:
+                return
+
+    # Adding explicit additionalProperties changes evaluated-property annotations.
+    # Keep the original spelling when an enclosing same-instance schema relies on
+    # unevaluatedProperties; schemas for child values start a new evaluation scope.
+    guarded = schema.get("unevaluatedProperties") is not True and (
+        preserve_evaluation or "unevaluatedProperties" in schema
+    )
     is_plain_open_object = (
-        not is_root
+        not is_root and not guarded
         and schema.get("type") == "object"
         and "additionalProperties" not in schema
         and not schema.get("properties")
@@ -126,12 +146,25 @@ def _normalize_qwen_open_nested_objects(
         and not any(key in schema for key in ("$ref", "allOf", "anyOf", "oneOf"))
     )
     if is_plain_open_object:
-        # JSON Schema's default is true; spelling it out only selects the
-        # representation that the Qwen parser can faithfully reconstruct.
         schema["additionalProperties"] = True
 
-    for value in tuple(schema.values()):
-        _normalize_qwen_open_nested_objects(value, is_root=False)
+    # Schema positions only: const, enum, defaults and extension data stay literal.
+    for key in ("properties", "patternProperties", "$defs", "definitions",
+                "dependentSchemas", "dependencies"):
+        mapping = schema.get(key)
+        if isinstance(mapping, dict):
+            for child in mapping.values():
+                _normalize_qwen_open_nested_objects(
+                    child, is_root=False,
+                    preserve_evaluation=guarded if key in ("dependentSchemas", "dependencies") else False,
+                )
+    for key in ("items", "additionalItems", "additionalProperties", "unevaluatedProperties",
+                "unevaluatedItems", "contains", "propertyNames", "prefixItems"):
+        _normalize_qwen_open_nested_objects(schema.get(key), is_root=False)
+    for key in ("not", "if", "then", "else", "allOf", "anyOf", "oneOf"):
+        _normalize_qwen_open_nested_objects(
+            schema.get(key), is_root=False, preserve_evaluation=guarded,
+        )
 
 
 def _normalize_qwen_tool_schemas(tools: list[dict[str, object]]) -> None:
@@ -203,6 +236,69 @@ def _tool_is_strict(tool: ChatCompletionToolsParam | ResponsesTool) -> bool:
     return False
 
 
+def _radiance_qwen_auto_grammar(model: str) -> bool:
+    import os
+    return (
+        model in _QWEN_XML_STRUCTURAL_TAG_MODELS
+        and os.environ.get("RADIANCE_QWEN_AUTO_TOOL_GRAMMAR", "0") == "1"
+    )
+
+
+def _radiance_qwen_integer_bounds(schema: object) -> None:
+    """Normalize schema nodes, never examples/defaults or instance data.
+
+    The opt-in Int64 compatibility mode narrows ONLY a float maximum equal to
+    2**63 to INT64_MAX. This repairs rounded Int64 schema exports; it is not
+    an exact transformation for a caller deliberately requesting 2**63.
+    """
+    import os
+    if not isinstance(schema, dict):
+        return
+    types = schema.get("type")
+    integer = types == "integer" or (
+        isinstance(types, list) and "integer" in types and "number" not in types
+    )
+    if integer:
+        for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+            value = schema.get(key)
+            if not isinstance(value, float) or not value.is_integer():
+                continue
+            exact = int(value)
+            if -(2**63) <= exact < 2**63:
+                schema[key] = exact
+            elif (
+                key == "maximum" and exact == 2**63
+                and os.environ.get("RADIANCE_QWEN_INT64_BOUND_COMPAT", "0") == "1"
+            ):
+                schema[key] = 2**63 - 1
+            else:
+                raise ValueError(
+                    "Qwen tool schema has an integer bound outside XGrammar's "
+                    "Int64 range. Export exact integer bounds instead of rounded "
+                    "floating-point limits. For rounded Int64 maximum exports "
+                    "only, an operator may explicitly enable "
+                    "RADIANCE_QWEN_INT64_BOUND_COMPAT=1 (narrows to INT64_MAX)."
+                )
+    for key in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas"):
+        mapping = schema.get(key)
+        if isinstance(mapping, dict):
+            for child in mapping.values():
+                _radiance_qwen_integer_bounds(child)
+    for key in ("items", "additionalProperties", "unevaluatedProperties", "unevaluatedItems",
+                "contains", "propertyNames", "not", "if", "then", "else"):
+        child = schema.get(key)
+        if isinstance(child, list):
+            for item in child:
+                _radiance_qwen_integer_bounds(item)
+        else:
+            _radiance_qwen_integer_bounds(child)
+    for key in ("allOf", "anyOf", "oneOf", "prefixItems"):
+        children = schema.get(key)
+        if isinstance(children, list):
+            for child in children:
+                _radiance_qwen_integer_bounds(child)
+
+
 def _any_tool_strict(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
 ) -> bool:
@@ -263,13 +359,29 @@ def get_model_structural_tag(
     tools = get_structural_tag_tools(model, tools, tool_choice)
     if not tools:
         return None
+    # Preserve the legacy opt-in using v0.33 native strictness semantics.
+    if _radiance_qwen_auto_grammar(model):
+        strict_level = max(strict_level, ToolStrictLevel.FUNCTION)
+        # Legacy XGrammar treated an omitted strict flag as schema-strict.
+        # Preserve that opt-in contract while respecting explicit false.
+        tools = [
+            _with_tool_strict(tool, True)
+            if ((isinstance(tool, FunctionTool) and tool.strict is None)
+                or (isinstance(tool, ChatCompletionToolsParam)
+                    and tool.function.strict is None))
+            else tool for tool in tools
+        ]
     tools = resolve_tool_strictness(tools, tool_choice, strict_level)
     if tools is None:
         return None
 
-    dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
+    # radiance: Responses tool parameters may otherwise alias caller schemas.
+    from copy import deepcopy
+    dumped_tools = [deepcopy(_dump_tool_for_xgrammar(tool)) for tool in tools]
     if model in _QWEN_XML_STRUCTURAL_TAG_MODELS:
         _normalize_qwen_tool_schemas(dumped_tools)
+        for tool in dumped_tools:
+            _radiance_qwen_integer_bounds(tool.get("function", {}).get("parameters"))
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
 
     if model in _VLLM_STRUCTURAL_TAG_REGISTRY:
@@ -1061,6 +1173,14 @@ _GLM_4_7_VALUE_EXCLUDES = [
 ]
 
 
+# Only scalar values are pinned as bare JSON. Array and object values stay raw
+# text: a JSON grammar there admits only JSON escapes after a backslash, so text
+# the model writes with bare backslashes (a Windows path) is forced into escapes
+# the model gives near-zero probability. The parser keeps the raw text when such
+# a value is not valid JSON.
+_GLM_4_7_JSON_SCALAR_TYPES = frozenset({"integer", "number", "boolean", "null"})
+
+
 def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
     if "enum" in prop:
         values = [
@@ -1069,16 +1189,11 @@ def _glm_4_7_value_format(prop: dict[str, Any]) -> Any:
         ]
         return values[0] if len(values) == 1 else OrFormat(elements=values)
     prop_type = prop.get("type")
-    if isinstance(prop_type, list):
-        formats = [
-            _glm_4_7_value_format({"type": t}) for t in prop_type if t != "string"
-        ]
-        if "string" in prop_type:
-            formats.append(AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES))
-        return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
-    if prop_type in (None, "string"):
+    types = prop_type if isinstance(prop_type, list) else [prop_type]
+    if not types or not all(t in _GLM_4_7_JSON_SCALAR_TYPES for t in types):
         return AnyTextFormat(excludes=_GLM_4_7_VALUE_EXCLUDES)
-    return JSONSchemaFormat(json_schema={"type": prop_type})
+    formats = [JSONSchemaFormat(json_schema={"type": t}) for t in types]
+    return formats[0] if len(formats) == 1 else OrFormat(elements=formats)
 
 
 def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
@@ -1098,7 +1213,7 @@ def _glm_4_7_plain_properties(params: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _glm_4_7_tool_tag(tool: FunctionToolParam) -> TagFormat:
-    """Shallow tag for a non-strict tool: keys and basic value types pinned."""
+    """Shallow tag for a non-strict tool: keys and scalar value types pinned."""
     properties = _glm_4_7_plain_properties(tool.function.parameters or {})
     if properties is None:
         return TagFormat(

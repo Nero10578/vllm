@@ -24,9 +24,10 @@ _MAXL, _MIN, _SH = 24, 3, 20      # n-gram match bounds; key packs (matchlen << 
 
 
 @triton.jit
-def _match_scan(ctx, nA, ML, key, MAXL: tl.constexpr, MIN: tl.constexpr, SH: tl.constexpr, BLOCK: tl.constexpr):
+def _match_scan(ctx, nA, rows, ML, key, INDEXED: tl.constexpr, MAXL: tl.constexpr, MIN: tl.constexpr, SH: tl.constexpr, BLOCK: tl.constexpr):
     i = tl.program_id(0)                                   # request row in the context mirror
-    n = tl.load(nA + i); row = ctx + i * ML
+    slot = tl.load(rows + i) if INDEXED else i
+    n = tl.load(nA + slot); row = ctx + slot * ML
     q = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     alive = q < (n - 1); L = tl.zeros((BLOCK,), tl.int32)  # longest backward suffix match at end-pos q
     for k in range(MAXL):
@@ -38,24 +39,34 @@ def _match_scan(ctx, nA, ML, key, MAXL: tl.constexpr, MIN: tl.constexpr, SH: tl.
 
 
 @triton.jit
-def _match_gather(ctx, nA, ML, key, cont, clen, SH: tl.constexpr, NSPEC: tl.constexpr):
-    i = tl.program_id(0); n = tl.load(nA + i); row = ctx + i * ML; k = tl.load(key + i)
+def _match_gather(ctx, nA, rows, ML, key, cont, clen, INDEXED: tl.constexpr, SH: tl.constexpr, NSPEC: tl.constexpr,
+                  BLOCK: tl.constexpr):
+    i = tl.program_id(0)
+    slot = tl.load(rows + i) if INDEXED else i
+    n = tl.load(nA + slot); row = ctx + slot * ML; k = tl.load(key + i)
     start = (k & ((1 << SH) - 1)) + 1; has = k != 0
-    t = tl.arange(0, NSPEC); valid = has & (start + t < n)
-    tl.store(cont + i * NSPEC + t, tl.where(valid, tl.load(row + start + t, mask=valid, other=-1), -1))
+    t = tl.arange(0, BLOCK); in_bounds = t < NSPEC
+    valid = in_bounds & has & (start + t < n)
+    tl.store(cont + i * NSPEC + t,
+             tl.where(valid, tl.load(row + start + t, mask=valid, other=-1), -1),
+             mask=in_bounds)
     tl.store(clen + i, tl.sum(valid.to(tl.int32), 0))
 
 
-def match_gpu(ctx, n_arr, nspec, nmax):
+def match_gpu(ctx, n_arr, nspec, nmax, rows=None):
     """ctx [B, maxlen] int32 GPU context mirror; n_arr [B] int32 lengths; nmax = max length (from the
     host-side num_tokens_no_spec, so no D2H). Returns cont [B,nspec] i32 and cont_len [B], both on
-    device. Full-context, no window."""
-    B, ML = ctx.shape
+    device. Full-context, no window. With rows, use the resident request slots
+    in ctx and n_arr without copying the token history into batch order."""
+    indexed = rows is not None
+    B = rows.numel() if indexed else ctx.shape[0]
+    ML = ctx.stride(0)
     key = torch.zeros(B, dtype=torch.int32, device=ctx.device)
     cont = torch.empty(B * nspec, dtype=torch.int32, device=ctx.device)
     clen = torch.empty(B, dtype=torch.int32, device=ctx.device)
-    _match_scan[(B, triton.cdiv(nmax, 512))](ctx, n_arr, ML, key, _MAXL, _MIN, _SH, BLOCK=512)
-    _match_gather[(B,)](ctx, n_arr, ML, key, cont, clen, _SH, nspec)
+    _match_scan[(B, triton.cdiv(nmax, 512))](ctx, n_arr, rows, ML, key, indexed, _MAXL, _MIN, _SH, BLOCK=512)
+    _match_gather[(B,)](ctx, n_arr, rows, ML, key, cont, clen, indexed, _SH, nspec,
+                        triton.next_power_of_2(nspec))
     return cont.view(B, nspec), clen
 
 
@@ -73,7 +84,10 @@ def _cap_s1(logits, V, pm, ps, NSPLIT, CHUNK: tl.constexpr, BLOCK: tl.constexpr)
         mask = idx < V
         l = tl.load(row + idx, mask=mask, other=-float("inf")).to(tl.float32)
         nm = tl.maximum(m, tl.max(l, 0))
-        e = tl.where(mask, tl.exp(l - nm), 0.0)
+        # A real (e.g. padded) block can contain only -inf. Its contribution
+        # is zero, rather than exp(-inf - -inf) poisoning every later sum.
+        nm_safe = tl.where(nm == -float("inf"), 0.0, nm)
+        e = tl.where(mask, tl.exp(l - nm_safe), 0.0)
         sc = tl.where(m == float("-inf"), 0.0, tl.exp(m - nm))
         s = s * sc + tl.sum(e, 0); m = nm
     o = b * NSPLIT + sp
@@ -86,9 +100,10 @@ def _cap_s2(logits, V, pm, ps, conf, NSPLIT, BN: tl.constexpr):
     r = tl.arange(0, BN); mask = r < NSPLIT; o = b * NSPLIT + r
     m = tl.load(pm + o, mask=mask, other=-float("inf"))
     s = tl.load(ps + o, mask=mask, other=0.0)
-    M = tl.max(m, 0); sc = tl.exp(m - M)
+    M = tl.max(m, 0); sc = tl.where(m == -float("inf"), 0.0, tl.exp(m - M))
     S = tl.sum(s * sc, 0)
-    tl.store(conf + b, 1.0 / S)                             # top-1 softmax prob = exp(max-M)/S = 1/S
+    # Preserve the undefined all-masked softmax instead of reporting infinity.
+    tl.store(conf + b, tl.where(M == -float("inf"), float("nan"), 1.0 / S))
 
 
 def capture_gpu(logits, out_conf, scratch):
@@ -96,7 +111,8 @@ def capture_gpu(logits, out_conf, scratch):
     scratch holds the [B*NSPLIT] partials (reused across slots)."""
     B, V = logits.shape
     pm, ps = scratch
-    _cap_s1[(B, _NSPLIT)](logits, V, pm, ps, _NSPLIT, _CHUNK, _CBLOCK)
+    chunk = max(_CHUNK, triton.cdiv(V, _NSPLIT * _CBLOCK) * _CBLOCK)
+    _cap_s1[(B, _NSPLIT)](logits, V, pm, ps, _NSPLIT, chunk, _CBLOCK)
     _cap_s2[(B,)](logits, V, pm, ps, out_conf, _NSPLIT, 64)
 
 
@@ -108,7 +124,7 @@ def _cap_s2_local(pm, ps, om, os_, NSPLIT, BN: tl.constexpr):
     r = tl.arange(0, BN); mask = r < NSPLIT; o = b * NSPLIT + r
     m = tl.load(pm + o, mask=mask, other=-float("inf"))
     s = tl.load(ps + o, mask=mask, other=0.0)
-    M = tl.max(m, 0); sc = tl.exp(m - M)
+    M = tl.max(m, 0); sc = tl.where(m == -float("inf"), 0.0, tl.exp(m - M))
     tl.store(om + b, M)
     tl.store(os_ + b, tl.sum(s * sc, 0))
 
@@ -120,7 +136,8 @@ def capture_local(logits, out_max, out_sum, scratch):
     floats per row instead of the whole 248320-wide logit row."""
     B, V = logits.shape
     pm, ps = scratch
-    _cap_s1[(B, _NSPLIT)](logits, V, pm, ps, _NSPLIT, _CHUNK, _CBLOCK)
+    chunk = max(_CHUNK, triton.cdiv(V, _NSPLIT * _CBLOCK) * _CBLOCK)
+    _cap_s1[(B, _NSPLIT)](logits, V, pm, ps, _NSPLIT, chunk, _CBLOCK)
     _cap_s2_local[(B,)](pm, ps, out_max, out_sum, _NSPLIT, 64)
 
 

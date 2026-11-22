@@ -1,5 +1,9 @@
 # Radiance baremetal setup — from zero
 
+> **Base note (0.34 upgrade):** the tree now tracks vLLM 0.34.0 and vllm-radiance
+> `1.2.0-rc1`, and the AITER default is 0.1.26. The historical notes below that name
+> 0.1.23 / 0.1.20 describe the earlier stack; the steps and failure fixes still apply.
+
 This is the end-to-end runbook for building and serving **this fork** (the radiance-gfx1201 vLLM)
 on a bare-metal ROCm 10.1 host with `uv` as the Python environment. It records the exact steps that
 worked, and every failure we hit along the way with its fix, so you don't rediscover them.
@@ -261,13 +265,13 @@ RADIANCE_SKIP_HIPEXT=1 RADIANCE_SKIP_SMOKE=1 RADIANCE_INSTALL_AITER=1 ./radiance
 Facts:
 
 - **No `amd-aiter` wheel is published** (neither on the AMD whl-next index nor PyPI), so bootstrap
-  builds it from source: `ROCm/aiter`, default tag **v0.1.23** (`50da036a`), with
+  builds it from source: `ROCm/aiter`, default tag **v0.1.26** (`84077b3c`), with
   `GPU_ARCHS=gfx1201 PREBUILD_KERNELS=0 AITER_USE_SYSTEM_TRITON=1`. Override with
   `RADIANCE_AITER_VERSION` / `RADIANCE_AITER_COMMIT` / `RADIANCE_AITER_SPEC`.
 - It JIT-builds `module_aiter_core` on first import (~25 s), visible as `[aiter] start build
   [module_aiter_core]`.
-- The qualified image used AITER **0.1.20**; we default to 0.1.23 because 0.1.20 predates
-  torch 2.14 / ROCm 10.1.
+- vllm-radiance 1.2.0-rc1 (vLLM 0.34) pins AITER **0.1.26** / flydsl **0.4.0**; those are
+  the defaults. AITER 0.1.23 remains available via `RADIANCE_AITER_VERSION=0.1.23`.
 
 ### The RDNA LDS-fit overlay (re-ported for aiter >= 0.1.21)
 

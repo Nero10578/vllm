@@ -58,7 +58,7 @@ REG_NEW = REG_OLD + '    R4D = "radiance_r4d_attn.R4DAttentionBackend"\n'
 
 
 # ---- 2. the gated-delta-net layer ------------------------------------------------------------
-LAYER_IMPORT_OLD = "from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata\n"
+LAYER_IMPORT_OLD = "from vllm.v1.attention.backends.gdn_attn import (\n    FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,\n    GDNAttentionMetadata,\n)\n"
 LAYER_IMPORT_NEW = (
     LAYER_IMPORT_OLD
     + "\n"
@@ -71,9 +71,6 @@ LAYER_IMPORT_NEW = (
 # Anchor the full standard-path prologue. Pinned vLLM main now has a second
 # fused-norm helper with the same warm-up body, so the old four-line anchor is
 # no longer unique even though the intended insertion point is unchanged.
-# Re-anchored for the newer base: the metadata handle is now resolved from a
-# dict and the warm-up guard covers that handle rather than the raw value. The
-# hook still goes immediately after the warm-up return and before the real body.
 LAYER_OLD = (
     "    def _forward_core(\n"
     "        self,\n"

@@ -141,8 +141,6 @@ SUPPORTS_NEW = (
 
 
 # --- 3. aiter 0.1.17 moved the fp4 GEMM module, and gates fp4 on its own arch allowlist -----
-# Re-anchored for the newer base, which imports gemm_afp4wfp4_preshuffle rather than
-# gemm_afp4wfp4_preshuffled_weight_scales. Keep the caller's symbol names.
 IMPORT_ANCHOR = (
     "        from aiter.ops.triton.gemm_afp4wfp4 import (\n"
     "            gemm_afp4wfp4,\n"
@@ -150,28 +148,19 @@ IMPORT_ANCHOR = (
     "        )\n"
 )
 IMPORT_NEW = (
-    "        # --- radiance (patch_quark_mxfp4.py): aiter moved this module ---\n"
-    "        try:\n"
-    "            from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import (\n"
-    "                gemm_afp4wfp4,\n"
-    "                gemm_afp4wfp4_preshuffle,\n"
-    "            )\n"
-    "        except ImportError:\n"
-    "            from aiter.ops.triton.gemm_afp4wfp4 import (\n"
-    "                gemm_afp4wfp4,\n"
-    "                gemm_afp4wfp4_preshuffle,\n"
-    "            )\n"
+    "        # --- radiance (patch_quark_mxfp4.py): aiter 0.1.17 moved this module ---\n"
+    "        from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import (\n"
+    "            gemm_afp4wfp4,\n"
+    "            gemm_afp4wfp4_preshuffled_weight_scales as gemm_afp4wfp4_preshuffle,\n"
+    "        )\n"
     "\n"
     "        # aiter allowlists gfx950/gfx1250 for fp4; gfx1201 lowers tl.dot_scaled correctly\n"
     "        # (verified bit-identical against the emulated path), so relax the assert. Done\n"
     "        # here, lazily, to keep aiter out of the plugin-load import graph.\n"
-    "        try:\n"
-    "            import aiter.ops.triton.utils._triton.arch_info as _radiance_arch\n"
+    "        import aiter.ops.triton.utils._triton.arch_info as _radiance_arch\n"
     "\n"
-    "            if not _radiance_arch.is_fp4_avail():\n"
-    "                _radiance_arch.is_fp4_avail = lambda: True\n"
-    "        except ImportError:\n"
-    "            pass\n"
+    "        if not _radiance_arch.is_fp4_avail():\n"
+    "            _radiance_arch.is_fp4_avail = lambda: True\n"
 )
 
 

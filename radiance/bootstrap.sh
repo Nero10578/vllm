@@ -6,7 +6,8 @@
 # without Docker. The fork source already carries the radiance vLLM patches; this
 # script supplies what vllm-radiance supplied at image build time: the ROCm Python
 # stack, libr4d, the MXFP4/W4A8 HIP extension, the runtime modules, the tuned
-# configs, the out-of-tree patches, and the amdsmi startup hook.
+# configs, the out-of-tree patches, the general-plugin entry point, and the amdsmi
+# startup hook.
 #
 # The default stack mode mirrors the proven ROCm 10.1 + AMD whl-next flow for
 # gfx1201 (torch 2.14.0+rocm10.1.0), which matches this fork's `torch == 2.14.0`
@@ -58,8 +59,13 @@ if [ -z "$ROCM_ROOT" ]; then
 fi
 
 R4D_REPO="${RADIANCE_R4D_REPO:-https://codeberg.org/StillDeadcode/libr4d.git}"
-R4D_VERSION="${RADIANCE_R4D_VERSION:-v0.5.0}"
+R4D_VERSION="${RADIANCE_R4D_VERSION:-0.5.0+rdna4.451b136}"
 R4D_COMMIT="${RADIANCE_R4D_COMMIT:-e8de4bc1f3dbd608dcb8d3ffceb6b48acdf83bb7}"
+# vllm-radiance 1.2.0-rc1 compiles the maintained attention/GDN scan from
+# StillDeadcode/radiance into libr4d (prepare_r4d.py); the legacy checkout alone
+# no longer carries the current kernels.
+R4D_UPSTREAM_REPO="${RADIANCE_R4D_UPSTREAM_REPO:-https://codeberg.org/StillDeadcode/radiance.git}"
+R4D_UPSTREAM_COMMIT="${RADIANCE_R4D_UPSTREAM_COMMIT:-451b136874084650992668bed9e8662deb58de88}"
 R4D_DIR="${RADIANCE_R4D_DIR:-}"                     # optional existing clone
 
 SKIP_DEPS="${RADIANCE_SKIP_DEPS:-0}"
@@ -287,12 +293,13 @@ fi
 # hunk. Opt in with RADIANCE_INSTALL_AITER=1.
 if [ "${RADIANCE_INSTALL_AITER:-0}" = "1" ]; then
   log "AITER (gfx1201, source build; kernels JIT at runtime)"
-  # The qualified image pinned AITER 0.1.20 (fc2e5d57) for torch 2.12 / ROCm 7.14. This
-  # host is torch 2.14 / ROCm 10.1, so default to the current ROCm/aiter tag and let the
-  # operator override. Changing the AITER version changes the AITER-backed tuning paths
-  # (preshuffle FP8 GEMM, unified attention, GDN knobs), so treat it as a re-qualification.
-  AITER_VERSION="${RADIANCE_AITER_VERSION:-0.1.23}"
-  AITER_COMMIT="${RADIANCE_AITER_COMMIT:-50da036acdedec2dd596f93188d6c615e2561672}"
+  # vllm-radiance 1.2.0-rc1 (vLLM 0.34) pins AITER 0.1.26 and flydsl 0.4.0; the radiance
+  # 0.34 patch set is qualified against that tag. This host is torch 2.14 / ROCm 10.1, so
+  # keep the version overridable. Changing the AITER version changes the AITER-backed
+  # tuning paths (preshuffle FP8 GEMM, unified attention, GDN knobs), so treat it as a
+  # re-qualification. Set RADIANCE_AITER_VERSION=0.1.23 if a 0.1.26 source build fails.
+  AITER_VERSION="${RADIANCE_AITER_VERSION:-0.1.26}"
+  AITER_COMMIT="${RADIANCE_AITER_COMMIT:-84077b3c0461dac1f0f3f8b9590a9282e2035a2f}"
   AITER_SPEC="${RADIANCE_AITER_SPEC:-}"
   # No amd-aiter wheel is published on the AMD whl-next index or PyPI (verified against
   # https://stable.repo.amd.com/rocm/whl-next/), so the index paths are best-effort and the
@@ -318,7 +325,7 @@ if [ "${RADIANCE_INSTALL_AITER:-0}" = "1" ]; then
   # aiter is installed with --no-deps (so it cannot replace torch/triton), but aiter >= 0.1.21
   # needs its own Python deps — notably `flydsl`, which aiter/__init__.py imports via
   # topk_select. Install them explicitly; unpinned so already-satisfied ones are left alone.
-  AITER_FLYDSL="${RADIANCE_FLYDSL_SPEC:-flydsl==0.3.4.1}"
+  AITER_FLYDSL="${RADIANCE_FLYDSL_SPEC:-flydsl==0.4.0}"
   uv pip install --python "$PY" pandas psutil matplotlib pyyaml einops pybind11 ninja \
     "$AITER_FLYDSL" \
     || warn "installing aiter runtime deps failed; aiter import may fail until they are present"
@@ -392,7 +399,18 @@ if [ "$SKIP_R4D" != "1" ]; then
   git -C "$SRC" apply --check "$PATCHES/r4d_radiance_extras.patch" 2>/dev/null \
     && git -C "$SRC" apply "$PATCHES/r4d_radiance_extras.patch" \
     || warn "r4d extras patch already applied or not applicable; continuing"
-  ( cd "$SRC" && PATH="$VENV/bin:$PATH" GFX_ARCH="$GFX_ARCH" OUT="$SP/r4d.so" ./build.sh )
+  UP="$WORK/radiance-maintained"
+  git clone --filter=blob:none --no-checkout "$R4D_UPSTREAM_REPO" "$UP"
+  git -C "$UP" fetch --depth 1 origin "$R4D_UPSTREAM_COMMIT" || true
+  git -C "$UP" checkout --detach "$R4D_UPSTREAM_COMMIT" \
+    || die "radiance upstream commit $R4D_UPSTREAM_COMMIT not found"
+  [ "$(git -C "$UP" rev-parse HEAD)" = "$R4D_UPSTREAM_COMMIT" ] || die "radiance upstream checkout mismatch"
+  # prepare_r4d refuses a libr4d tree that already has maintained/, so RADIANCE_R4D_DIR
+  # must be a fresh checkout for this flow.
+  "$PY" "$PATCHES/prepare_r4d.py" --legacy "$SRC" --upstream "$UP" \
+    --version "$R4D_VERSION" --upstream-commit "$R4D_UPSTREAM_COMMIT"
+  ( cd "$SRC" && PATH="$VENV/bin:$PATH" GFX_ARCH="$GFX_ARCH" \
+      JOBS="${RADIANCE_R4D_JOBS:-$(nproc)}" OUT="$SP/r4d.so" ./build.sh )
   "$PY" - <<PY || warn "r4d import check failed (see error above); continuing"
 import r4d
 print("r4d", r4d.__version__, "kernels", len(r4d.kernels()))
@@ -425,11 +443,19 @@ if [ "$SKIP_CONFIGS" != "1" ]; then
   log "tuned configs + amdsmi startup hook"
   install -d "$VLLM_PKG/vllm/model_executor/layers/quantization/utils/configs"
   install -d "$VLLM_PKG/vllm/model_executor/layers/fused_moe/configs"
-  install -d "$SP/aiter/ops/triton/configs/gemm" 2>/dev/null || true
+  # aiter >= 0.1.21 keeps the gfx1201 MXFP4 tiles under the per-arch tree; the file names
+  # are the aiter GEMM keys (DEFAULT is the fallback shape).
+  MXFP4_CFG="$SP/aiter/ops/triton/configs/gfx1201/triton/gemm/gemm_afp4wfp4"
+  install -d "$MXFP4_CFG" 2>/dev/null || true
   cp -f "$CONFIGS"/fp8/*.json  "$VLLM_PKG/vllm/model_executor/layers/quantization/utils/configs/"
   cp -f "$CONFIGS"/moe/*.json  "$VLLM_PKG/vllm/model_executor/layers/fused_moe/configs/"
-  cp -f "$CONFIGS"/mxfp4/*.json "$SP/aiter/ops/triton/configs/gemm/" 2>/dev/null \
-    || warn "aiter config dir absent; MXFP4 tiles not installed (aiter not in this env?)"
+  cp -f "$CONFIGS"/mxfp4/gfx1201-GEMM-AFP4WFP4-N=17408-K=5120.json \
+    "$MXFP4_CFG/GEMM-AFP4WFP4-N=17408-K=5120.json" 2>/dev/null || true
+  cp -f "$CONFIGS"/mxfp4/gfx1201-GEMM-AFP4WFP4-N=5120-K=8704.json \
+    "$MXFP4_CFG/GEMM-AFP4WFP4-N=5120-K=8704.json" 2>/dev/null || true
+  cp -f "$CONFIGS"/mxfp4/gfx1201-GEMM-AFP4WFP4.json "$MXFP4_CFG/DEFAULT.json" 2>/dev/null || true
+  [ -f "$MXFP4_CFG/DEFAULT.json" ] \
+    || warn "aiter MXFP4 config dir absent; tuned tiles not installed (aiter not in this env?)"
   cp -f "$ROOT/radiance_amdsmi.pth" "$SP/radiance_amdsmi.pth"
   echo "configs installed; amdsmi .pth installed (amdsmi_init before HIP)"
 else
@@ -454,6 +480,15 @@ else
 fi
 
 # -----------------------------------------------------------------------------
+# radiance is installed through vLLM's native general-plugin entry point
+# (`radiance = radiance_kernels:install_all`), not by patching vllm/plugins/__init__.py.
+# Run this unconditionally: without the dist-info entry point the runtime hooks
+# (block-FP8 dispatcher, verify head, attention tune, platform probe) never load.
+log "radiance general-plugin entry point"
+"$PY" "$PATCHES/install_radiance_hooks.py" \
+  || warn "radiance plugin entry point install failed; radiance runtime hooks will not load"
+
+# -----------------------------------------------------------------------------
 if [ "$SKIP_SMOKE" != "1" ]; then
   log "smoke test"
   "$PY" - <<'PY'
@@ -473,6 +508,12 @@ try:
     print("radiance runtime modules OK")
 except Exception as e:
     print("radiance runtime modules FAILED:", e)
+try:
+    from importlib.metadata import entry_points
+    eps = [e.name for e in entry_points(group="vllm.general_plugins")]
+    print("general_plugins:", eps)
+except Exception as e:
+    print("general_plugins check failed:", e)
 PY
 fi
 

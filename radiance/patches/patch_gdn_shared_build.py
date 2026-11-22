@@ -23,12 +23,10 @@ from _patchlib import apply
 
 SP = Path(sysconfig.get_paths()["purelib"])
 
-# Re-anchored for the newer base, which initializes token_to_req_indices between
-# the metadata dict and the group-count loop.
+# --- runner loop: one shared dict per build_attn_metadata call (= per step shape) -------------
 apply(
     SP / "vllm" / "v1" / "worker" / "gpu" / "attn_utils.py",
     "    attn_metadata: dict[str, Any] = {}\n"
-    "    token_to_req_indices: torch.Tensor | None = None\n"
     "    num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)\n",
     "    attn_metadata: dict[str, Any] = {}\n"
     "    # radiance (patch_gdn_shared_build.py): scoped to this call, so no cross-step identity\n"
@@ -37,7 +35,6 @@ apply(
     "        {} if __import__(\"os\").environ.get(\"RADIANCE_GDN_SHARED_BUILD\", \"1\") == \"1\"\n"
     "        else None\n"
     "    )\n"
-    "    token_to_req_indices: torch.Tensor | None = None\n"
     "    num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)\n",
     "_rad_gdn_shared",
     "gdn shared build: runner dict",

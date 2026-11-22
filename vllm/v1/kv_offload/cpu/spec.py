@@ -3,6 +3,7 @@
 from typing import Any
 
 from typing_extensions import override
+from radiance_kv_offload import get_rank_sharded_enabled
 
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
@@ -20,7 +21,10 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 
 
 def _all_workers_barrier() -> None:
@@ -125,6 +129,10 @@ class CPUOffloadingSpec(OffloadingSpec):
             # or |--- C0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
+        self.cpu_info = CPUOffloadingInfo.from_config(
+            config, self.num_chunks, self.kv_bytes_per_chunk
+        )
+
         # scheduler-side
         self._manager: OffloadingManager | None = None
 
@@ -161,6 +169,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
+                info=self.cpu_info,
             )
         return self._manager
 
@@ -180,6 +189,9 @@ class CPUOffloadingSpec(OffloadingSpec):
             # replicated region's pre-faulting work across the worker group.
             world_size = self.config.parallel.world_size
             worker_index = self.config.parallel.rank
+            rank_sharded = get_rank_sharded_enabled() and world_size > 1
+            if rank_sharded and self.replicated_layout:
+                raise RuntimeError("RADIANCE_KV_OFFLOAD_RANK_SHARDED is incompatible with replicated CPU KV layout")
 
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
@@ -188,6 +200,9 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
+                num_segments=REGION_SEGMENTS,
+                rank_sharded=rank_sharded,
+                world_size=world_size if rank_sharded else None,
                 populate_shard=(
                     (worker_index, world_size) if self.replicated_layout else None
                 ),
