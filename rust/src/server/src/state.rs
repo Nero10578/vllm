@@ -206,6 +206,17 @@ impl AppState {
             .with_accept_any(self.api_server_options.skip_model_name_validation)
     }
 
+    /// Base model names plus the loaded LoRA adapter names.
+    ///
+    /// Routes that accept a model name without selecting an adapter (for
+    /// example tokenization) must accept an adapter alias too, matching the
+    /// Python frontend, where `_check_model` accepts every loaded adapter name.
+    pub(crate) async fn model_names_with_adapters(&self) -> ServedModelNames {
+        let adapters = self.lora_manager.served_loras().await;
+        self.base_model_names()
+            .with_adapter_names(adapters.into_iter().map(|lora| lora.lora_name))
+    }
+
     /// Resolve the requested model against one dynamic LoRA registry snapshot.
     pub async fn resolve_model_with_loras(&self, model_name: Option<&str>) -> LoraModelResolution {
         self.resolve_model_with_default_mm_loras(model_name, []).await
