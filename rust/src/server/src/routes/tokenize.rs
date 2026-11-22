@@ -15,6 +15,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 
 use crate::error::{ApiError, chat_submit_error, text_submit_error};
+use crate::model_names::ServedModelNames;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::tokenize::types::{
     DetokenizeRequest, DetokenizeResponse, TokenizeChatRequest, TokenizeCompletionRequest,
@@ -44,10 +45,14 @@ pub async fn tokenize(
     let request_id = tokenize_request_id(&headers)?;
     let tokenizer = state.chat.text().tokenizer();
     let max_model_len = state.llm().info().max_model_len;
+    // Adapter aliases are valid model names for tokenization, as in Python.
+    let model_names = state.model_names_with_adapters().await;
 
     let (tokens, want_strs) = match body {
-        TokenizeRequest::Completion(req) => tokenize_completion(&state, &request_id, req)?,
-        TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await?,
+        TokenizeRequest::Completion(req) => {
+            tokenize_completion(&state, &model_names, &request_id, req)?
+        }
+        TokenizeRequest::Chat(req) => tokenize_chat(&state, &model_names, &request_id, req).await?,
     };
 
     let token_strs = want_strs.then(|| token_strs(&tokenizer, &tokens));
@@ -61,10 +66,11 @@ pub async fn tokenize(
 
 fn tokenize_completion(
     state: &AppState,
+    model_names: &ServedModelNames,
     request_id: &str,
     req: TokenizeCompletionRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
-    state.base_model_names().check(req.model.as_deref())?;
+    model_names.check(req.model.as_deref())?;
     let return_token_strs = req.return_token_strs;
     let tokens = state
         .chat
@@ -81,10 +87,11 @@ fn tokenize_completion(
 /// to [`ApiError`].
 async fn tokenize_chat(
     state: &AppState,
+    model_names: &ServedModelNames,
     request_id: &str,
     req: TokenizeChatRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
-    state.base_model_names().check(req.model.as_deref())?;
+    model_names.check(req.model.as_deref())?;
     let return_token_strs = req.return_token_strs;
     // `continue_final_message` / `add_generation_prompt` mutual exclusion is
     // enforced in `normalize_generation_prompt_mode` inside `into_chat_request`.
@@ -107,7 +114,10 @@ pub async fn detokenize(
     State(state): State<Arc<AppState>>,
     ValidatedJson(body): ValidatedJson<DetokenizeRequest>,
 ) -> Result<Json<DetokenizeResponse>, ApiError> {
-    state.base_model_names().check(body.model.as_deref())?;
+    state
+        .model_names_with_adapters()
+        .await
+        .check(body.model.as_deref())?;
     let tokenizer = state.chat.text().tokenizer();
     let prompt = tokenizer
         .decode(&body.tokens, /* skip_special_tokens = */ false)
