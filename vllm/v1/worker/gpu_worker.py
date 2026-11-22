@@ -744,11 +744,49 @@ class Worker(WorkerBase):
                     randomize_inputs=self.randomize_dummy_inputs
                 )
 
+            # The configured value is a KV budget for *after* every other GPU
+            # allocation, but the profile run has just brought up the weights, the
+            # JIT state and the activation peak, and the CUDA graph pool is still
+            # to come. `init_snapshot` predates the weights, so it cannot answer
+            # "will this fit": measure the memory that is free now, hold back the
+            # graph pool plus a small allocator buffer, and clamp instead of
+            # letting allocate_kv_cache OOM.
+            cudagraph_memory_estimate = 0
+            may_capture_graphs = (
+                current_platform.is_cuda_alike() or current_platform.is_xpu()
+            )
+            if may_capture_graphs and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
+                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+            torch.accelerator.empty_cache()
+            post_profile_snapshot = MemorySnapshot(device=self.device)
+            redundancy_buffer_memory = 150 * (1 << 20)
+            safe_kv_cache_bytes = (
+                post_profile_snapshot.free_memory
+                - cudagraph_memory_estimate
+                - redundancy_buffer_memory
+            )
+            if kv_cache_memory_bytes > safe_kv_cache_bytes:
+                logger.warning(
+                    "kv_cache_memory_bytes requested %s GiB, but only %s GiB is "
+                    "free after model load; holding back %s GiB for the CUDA "
+                    "graph pool and allocator headroom and clamping the KV cache "
+                    "to %s GiB. Prefer --gpu-memory-utilization to let vLLM size "
+                    "this automatically.",
+                    format_gib(kv_cache_memory_bytes),
+                    format_gib(post_profile_snapshot.free_memory),
+                    format_gib(
+                        cudagraph_memory_estimate + redundancy_buffer_memory
+                    ),
+                    format_gib(max(safe_kv_cache_bytes, 0)),
+                )
+                kv_cache_memory_bytes = max(safe_kv_cache_bytes, 0)
+
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
-                f"GiB, reserved {format_gib(kv_cache_memory_bytes)} GiB memory for "
-                "KV Cache as specified by kv_cache_memory_bytes config and "
-                "skipped memory profiling. This does not respect the "
+                f"GiB ({format_gib(post_profile_snapshot.free_memory)} GiB after "
+                f"model load), reserved {format_gib(kv_cache_memory_bytes)} GiB "
+                "memory for KV Cache as specified by kv_cache_memory_bytes config "
+                "and skipped memory profiling. This does not respect the "
                 "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
                 "config when you want manual control of KV cache memory "
                 "size. If OOM'ed, check the difference of initial free "
